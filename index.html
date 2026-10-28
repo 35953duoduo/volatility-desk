@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="纳斯达克与 A 股波动率观测台：VIX / VXN 隐含波动率与已实现波动率多年走势、历史规律统计、量化买卖诊断、A 股个股五档建议（韩国综合指数联动 + 动态 IC 权重）、大摩 A 股报告复盘事件研究，以及供 AI 辅助决策使用的只读 API。支持白天/夜晚主题。" />
+    <meta name="theme-color" content="#f2f5f9" />
+    <title>波动率观测台｜纳斯达克 + A 股 · VIX 恐慌指数 · 个股诊断 · 大摩报告复盘</title>
+    <script>
+      // 首屏前确定主题，避免白天/夜晚模式之间闪烁；默认跟随系统外观。
+      (function () {
+        var KEY = "vol-desk-theme";
+        var mode = "system";
+        try {
+          var stored = localStorage.getItem(KEY);
+          if (stored === "light" || stored === "dark" || stored === "system") mode = stored;
+        } catch (e) {
+          /* 隐私模式下 localStorage 不可用，退回跟随系统 */
+        }
+        var dark = mode === "dark" || (mode === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+        var root = document.documentElement;
+        root.dataset.theme = dark ? "dark" : "light";
+        root.style.colorScheme = dark ? "dark" : "light";
+        var meta = document.querySelector('meta[name="theme-color"]');
+        if (meta) meta.setAttribute("content", dark ? "#060a11" : "#f2f5f9");
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

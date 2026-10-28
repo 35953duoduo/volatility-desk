@@ -1,0 +1,24 @@
+# 依赖与构建产物
+node_modules/
+dist/
+*.tsbuildinfo
+
+# 环境变量与密钥（站点不代持任何密钥，仍保留忽略规则兜底）
+.env
+.env.*
+!.env.example
+
+# Qoder Sites 本地描述符
+.qoder-sites/
+.qoder-sites.json
+
+# 编辑器与系统文件
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.log
+
+# 本地验证截图（dev/ 下的脚本参与仓库，截图不参与）
+dev/preview-*.png
+dev/preview-*.jpg

@@ -1,0 +1,237 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "../vendor/shadcn-tailwind-4.13.0.css";
+
+/* 主题由 <html data-theme> 决定（白天 / 夜晚 / 跟随系统），不再依赖浏览器偏好查询 */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+@utility scrollbar-thin {
+  scrollbar-width: thin;
+}
+
+@utility scrollbar-none {
+  scrollbar-width: none;
+
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+@utility scrollbar-gutter-stable {
+  scrollbar-gutter: stable;
+}
+
+/* ── 白天模式：浅色行情台（同花顺日间配色） ── */
+:root {
+  color-scheme: light;
+  --background: #f2f5f9;
+  --foreground: #16202c;
+  --card: #ffffff;
+  --card-foreground: #16202c;
+  --popover: #ffffff;
+  --popover-foreground: #16202c;
+  --primary: #0d6e8c;
+  --primary-foreground: #f7fbfd;
+  --secondary: #e8eef5;
+  --secondary-foreground: #16202c;
+  --muted: #edf1f6;
+  --muted-foreground: #5b6d82;
+  --accent: #e2ebf4;
+  --accent-foreground: #16202c;
+  --destructive: #cf2f3d;
+  --border: #d5dfe9;
+  --input: #c8d5e2;
+  --ring: #0d84a8;
+  --sidebar: #f6f8fb;
+  --sidebar-foreground: #16202c;
+  --sidebar-primary: #0d6e8c;
+  --sidebar-primary-foreground: #f7fbfd;
+  --sidebar-accent: #e8eef5;
+  --sidebar-accent-foreground: #16202c;
+  --sidebar-border: #d5dfe9;
+  --sidebar-ring: #0d84a8;
+
+  /* 数据色板 */
+  --d-rv21: #0b7f9e;
+  --d-rv63: #2b5fd9;
+  --d-vxn: #b0700a;
+  --d-price: #6a4bc6;
+  --d-mint: #0b8a55;
+  --d-red: #cf2f3d;
+  --d-grid: #dfe7f0;
+
+  /* 图表辅助（坐标轴、气泡、参考线） */
+  --chart-tick: #66798f;
+  --chart-axis: #c2cfdd;
+  --zero-line: #9fb0c2;
+  --tooltip-bg: rgba(255, 255, 255, 0.97);
+  --tooltip-border: #d3dce7;
+  --tooltip-label: #66798f;
+  --tooltip-item: #16202c;
+  --tooltip-shadow: 0 10px 26px rgba(18, 40, 68, 0.16);
+  --cursor-cool: rgba(11, 127, 158, 0.08);
+  --cursor-warm: rgba(176, 112, 10, 0.09);
+
+  /* 页面装饰 */
+  --glow-a: rgba(11, 132, 168, 0.1);
+  --glow-b: rgba(176, 112, 10, 0.07);
+  --grid-line: rgba(88, 122, 158, 0.11);
+  --hairline: inset 0 1px 0 rgba(255, 255, 255, 0.85);
+
+  --chart-1: #f54900;
+  --chart-2: #009689;
+  --chart-3: #104e64;
+  --chart-4: #d9a400;
+  --chart-5: #fe9a00;
+
+  --radius: 0.625rem;
+
+  font-feature-settings: "tnum" 1;
+}
+
+/* ── 夜晚模式：深色交易终端 ── */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --background: #060a11;
+  --foreground: #dce7f4;
+  --card: #0b1220;
+  --card-foreground: #dce7f4;
+  --popover: #0b1220;
+  --popover-foreground: #dce7f4;
+  --primary: #38e1ff;
+  --primary-foreground: #04121a;
+  --secondary: #111a28;
+  --secondary-foreground: #dce7f4;
+  --muted: #111a28;
+  --muted-foreground: #7d90a8;
+  --accent: #16202e;
+  --accent-foreground: #dce7f4;
+  --destructive: #ff5d6c;
+  --border: #1b2838;
+  --input: #1b2838;
+  --ring: #38e1ff;
+  --sidebar: #0b1220;
+  --sidebar-foreground: #dce7f4;
+  --sidebar-primary: #38e1ff;
+  --sidebar-primary-foreground: #04121a;
+  --sidebar-accent: #16202e;
+  --sidebar-accent-foreground: #dce7f4;
+  --sidebar-border: #1b2838;
+  --sidebar-ring: #7d90a8;
+
+  /* 数据色板 */
+  --d-rv21: #38e1ff;
+  --d-rv63: #6f9bff;
+  --d-vxn: #ffb64d;
+  --d-price: #a98bff;
+  --d-mint: #3ddc97;
+  --d-red: #ff5d6c;
+  --d-grid: #16202e;
+
+  --chart-tick: #5f7288;
+  --chart-axis: #22303f;
+  --zero-line: #3a4c60;
+  --tooltip-bg: rgba(11, 18, 32, 0.96);
+  --tooltip-border: #1b2838;
+  --tooltip-label: #7d90a8;
+  --tooltip-item: #dce7f4;
+  --tooltip-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  --cursor-cool: rgba(56, 225, 255, 0.06);
+  --cursor-warm: rgba(255, 182, 77, 0.07);
+
+  --glow-a: rgba(56, 225, 255, 0.09);
+  --glow-b: rgba(255, 182, 77, 0.06);
+  --grid-line: rgba(120, 150, 180, 0.06);
+  --hairline: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+
+  --chart-1: #8e51ff;
+  --chart-2: #00bc7d;
+  --chart-3: #fe9a00;
+  --chart-4: #ad46ff;
+  --chart-5: #ff2056;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --font-sans: Arial, Helvetica, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    "Liberation Mono", "Courier New", monospace;
+}
+
+body {
+  background:
+    radial-gradient(1100px 460px at 78% -12%, var(--glow-a), transparent 62%),
+    radial-gradient(760px 380px at 6% 0%, var(--glow-b), transparent 60%),
+    var(--background);
+  color: var(--foreground);
+  font-family: "Inter", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, "Helvetica Neue", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 数据用等宽+表格数字，保证列对齐 */
+.tnum {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+/* 细网格背景，用于图表容器 */
+.grid-canvas {
+  background-image:
+    linear-gradient(to right, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--grid-line) 1px, transparent 1px);
+  background-size: 42px 26px;
+}
+
+.hairline {
+  box-shadow: var(--hairline);
+}
+
+.recharts-surface:focus {
+  outline: none;
+}
+
+/* 主题切换时只让颜色过渡，避免图表重排 */
+@media (prefers-reduced-motion: no-preference) {
+  html[data-theme] body,
+  html[data-theme] .theme-fade {
+    transition:
+      background-color 0.18s ease,
+      color 0.18s ease,
+      border-color 0.18s ease;
+  }
+}
