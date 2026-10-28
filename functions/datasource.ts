@@ -1,5 +1,9 @@
 // 数据源层：本地真实快照 + 运行时实时上游刷新（含缓存与降级状态上报）
 import { snapshot, type SnapshotData } from "./data/snapshot.ts";
+import {
+  dividendSnapshot,
+  type DividendRecordData,
+} from "./data/dividendSnapshot.ts";
 import { buildSeries, type Row, type VolPoint } from "./analytics.ts";
 
 export interface SymbolConfig {
@@ -417,27 +421,43 @@ let stockLiveCache: { data: StockDataset; at: number } | null = null;
 let stockSnapCache: { data: StockDataset; at: number } | null = null;
 let stockInflight: Promise<StockDataset> | null = null;
 
-/** 东方财富批量行情：一次请求取全部个股的最新价（fltt=2 时 f2 为两位小数价格） */
-async function fetchStockQuotes(secids: string[]): Promise<Map<string, number>> {
+interface StockQuoteDetail {
+  price: number;
+  /** 报价对应的交易日（按北京时间换算）；停牌或缺失时为 null */
+  quoteDate: string | null;
+}
+
+/** 东方财富批量行情：最新价 + 报价时间（f124 为 Unix 秒） */
+async function fetchStockQuoteDetails(secids: string[]): Promise<Map<string, StockQuoteDetail>> {
   const url =
     "https://push2.eastmoney.com/api/qt/ulist.np/get?secids=" +
     secids.map(encodeURIComponent).join(",") +
-    "&fields=f2,f12,f14&fltt=2";
+    "&fields=f2,f12,f14,f124&fltt=2";
   const res = await fetch(url, {
     headers: { "User-Agent": UA, Referer: "https://quote.eastmoney.com/" },
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
   if (!res.ok) throw new Error("HTTP " + res.status);
   const json: unknown = await res.json();
-  const diff = (json as { data?: { diff?: { f12?: string; f2?: number }[] } })?.data?.diff;
+  const diff = (json as { data?: { diff?: { f12?: string; f2?: number; f124?: number }[] } })?.data?.diff;
   if (!Array.isArray(diff) || diff.length === 0) throw new Error("empty quotes");
-  const map = new Map<string, number>();
+  const map = new Map<string, StockQuoteDetail>();
   for (const d of diff) {
     const code = String(d.f12 ?? "");
     const price = Number(d.f2);
-    if (/^\d{6}$/.test(code) && Number.isFinite(price) && price > 0) map.set(code, price);
+    const ts = Number(d.f124);
+    const quoteDate =
+      Number.isFinite(ts) && ts > 0 ? new Date((ts + 8 * 3600) * 1000).toISOString().slice(0, 10) : null;
+    if (/^\d{6}$/.test(code) && Number.isFinite(price) && price > 0) map.set(code, { price, quoteDate });
   }
   if (!map.size) throw new Error("no parsable quotes");
+  return map;
+}
+
+async function fetchStockQuotes(secids: string[]): Promise<Map<string, number>> {
+  const details = await fetchStockQuoteDetails(secids);
+  const map = new Map<string, number>();
+  for (const [code, q] of details) map.set(code, q.price);
   return map;
 }
 
@@ -859,5 +879,482 @@ export async function getStockDataset(opts: { refresh?: boolean; extras?: string
     extraInfos: resolved.infos,
     extraErrors: Object.keys(resolved.errors).length ? resolved.errors : undefined,
     updatedAt: Date.now(),
+  };
+}
+
+// ---------------- 红利策略数据层（国企高分红股，周线） ----------------
+
+export interface DividendStockSeries {
+  code: string;
+  name: string;
+  sector: string;
+  secid: string;
+  note: string;
+  weekly: Row[];
+  dividends: DividendRecordData[];
+}
+
+export interface DividendInfo {
+  code: string;
+  name: string;
+  sector: string;
+  secid: string;
+  note: string;
+  from: string;
+  to: string;
+  rows: number;
+}
+
+export interface DividendDataset {
+  stocks: Record<string, DividendStockSeries>;
+  statuses: SourceStatus[];
+  updatedAt: number;
+  asOf: string | null;
+  extraInfos?: DividendInfo[];
+  extraErrors?: Record<string, string>;
+}
+
+const DIVIDEND_LIVE_TTL_MS = 5 * 60 * 1000;
+const DIVIDEND_SNAP_TTL_MS = 10 * 60 * 1000;
+const DIVIDEND_EXTRA_TTL_MS = 10 * 60 * 1000;
+const DIVIDEND_EXTRA_ERROR_TTL_MS = 60 * 1000;
+const DIVIDEND_EXTRA_NOTE = "手动添加：东方财富不复权日线（失败回退腾讯）+ 东方财富分红明细（税前）";
+let dividendLiveCache: { data: DividendDataset; at: number } | null = null;
+let dividendSnapCache: { data: DividendDataset; at: number } | null = null;
+let dividendInflight: Promise<DividendDataset> | null = null;
+
+function snapshotDividendStocks(): Record<string, DividendStockSeries> {
+  const out: Record<string, DividendStockSeries> = {};
+  for (const s of dividendSnapshot.stocks) {
+    out[s.code] = {
+      code: s.code,
+      name: s.name,
+      sector: s.sector,
+      secid: s.secid,
+      note: s.note,
+      weekly: s.weekly.map((r) => [r[0], r[1]] as Row),
+      dividends: s.dividends.map((r) => ({ ...r })),
+    };
+  }
+  return out;
+}
+
+function dividendAsOf(stocks: Record<string, DividendStockSeries>): string | null {
+  let max: string | null = null;
+  for (const s of Object.values(stocks)) {
+    const last = s.weekly[s.weekly.length - 1];
+    if (last && (!max || last[0] > max)) max = last[0];
+  }
+  return max;
+}
+
+function weekKeyOf(date: string): string {
+  const d = new Date(date + "T00:00:00Z");
+  const offset = (d.getUTCDay() + 6) % 7;
+  d.setUTCDate(d.getUTCDate() - offset);
+  return d.toISOString().slice(0, 10);
+}
+
+/** 用批量报价覆盖本周最新一根周线；不修改导入的快照数组，避免污染 refresh=0 的结果 */
+async function overlayDividendQuotes(
+  stocks: Record<string, DividendStockSeries>,
+  statuses: SourceStatus[],
+): Promise<void> {
+  try {
+    const quotes = await fetchStockQuoteDetails(Object.values(stocks).map((s) => s.secid));
+    let updated = 0;
+    let latest: string | null = null;
+    for (const [code, entry] of Object.entries(stocks)) {
+      const q = quotes.get(code);
+      if (!q) continue;
+      const last = entry.weekly[entry.weekly.length - 1];
+      const date = q.quoteDate ?? (last ? last[0] : null);
+      if (!date) continue;
+      if (last && weekKeyOf(last[0]) === weekKeyOf(date)) {
+        if (date > last[0]) last[0] = date;
+        last[1] = q.price;
+        updated++;
+      } else if (!last || date > last[0]) {
+        entry.weekly.push([date, q.price]);
+        updated++;
+      }
+      if (!latest || date > latest) latest = date;
+    }
+    statuses.push({
+      id: "dividend_quotes",
+      label: "红利股实时报价（东方财富批量行情）",
+      kind: "price",
+      mode: "live",
+      ok: updated > 0,
+      note:
+        updated > 0
+          ? `${updated} 只更新至 ${latest}；本周 K 线可能尚未收盘，盘中价格会变动`
+          : "未取到可用报价，使用周线快照",
+      rows: updated,
+    });
+  } catch (err) {
+    statuses.push({
+      id: "dividend_quotes",
+      label: "红利股实时报价（东方财富批量行情）",
+      kind: "price",
+      mode: "snapshot",
+      ok: false,
+      note: "实时报价失败，使用周线快照：" + String((err as Error)?.message ?? err).slice(0, 80),
+    });
+  }
+}
+
+async function buildDividendDataset(refresh: boolean): Promise<DividendDataset> {
+  const stocks = snapshotDividendStocks();
+  const statuses: SourceStatus[] = [];
+  const count = Object.keys(stocks).length;
+  if (!refresh) {
+    statuses.push({
+      id: "dividend_snapshot",
+      label: "红利股周线与分红快照",
+      kind: "price",
+      mode: "snapshot",
+      ok: count > 0,
+      note: `${count} 只（生成于 ${dividendSnapshot.generatedAt.slice(0, 10)}）；不复权周线 + 税前分红`,
+    });
+    return { stocks, statuses, updatedAt: Date.now(), asOf: dividendAsOf(stocks) };
+  }
+  await overlayDividendQuotes(stocks, statuses);
+  statuses.push({
+    id: "dividend_snapshot",
+    label: "红利股周线与分红快照",
+    kind: "price",
+    mode: "snapshot",
+    ok: count > 0,
+    note: `${count} 只（生成于 ${dividendSnapshot.generatedAt.slice(0, 10)}）；不复权周线 + 税前分红`,
+  });
+  return { stocks, statuses, updatedAt: Date.now(), asOf: dividendAsOf(stocks) };
+}
+
+async function getBaseDividendDataset(refresh: boolean): Promise<DividendDataset> {
+  const now = Date.now();
+  if (dividendLiveCache && now - dividendLiveCache.at < DIVIDEND_LIVE_TTL_MS) return dividendLiveCache.data;
+  if (!refresh) {
+    if (dividendSnapCache && now - dividendSnapCache.at < DIVIDEND_SNAP_TTL_MS) return dividendSnapCache.data;
+    const built = buildDividendDataset(false).then((d) => {
+      dividendSnapCache = { data: d, at: d.updatedAt };
+      return d;
+    });
+    return built;
+  }
+  if (dividendInflight) return dividendInflight;
+  dividendInflight = buildDividendDataset(true)
+    .then((d) => {
+      dividendLiveCache = { data: d, at: d.updatedAt };
+      return d;
+    })
+    .finally(() => {
+      dividendInflight = null;
+    });
+  return dividendInflight;
+}
+
+// ---------------- 手动添加的红利股（GET 参数触发，按需抓取，不写入快照） ----------------
+
+interface DividendExtraData {
+  name: string;
+  weekly: Row[];
+  dividends: DividendRecordData[];
+}
+
+interface DividendExtraEntry {
+  at: number;
+  entry: DividendStockSeries;
+  info: DividendInfo;
+}
+
+const dividendExtraCache = new Map<string, DividendExtraEntry>();
+const dividendExtraErrors = new Map<string, { at: number; error: string }>();
+const dividendExtraInflight = new Map<string, Promise<DividendExtraData>>();
+
+/** 东方财富不复权日线（fqt=0，2015 起）；红利股息率必须与不复权价格同口径 */
+async function fetchEastmoneyDividendDaily(code: string): Promise<{ name: string; rows: Row[] }> {
+  const url =
+    "https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=" +
+    encodeURIComponent(stockSecid(code)) +
+    "&fields1=f1,f2,f3,f4&fields2=f51,f52,f53,f54,f55,f56&klt=101&fqt=0&beg=" +
+    EXTRA_BEG +
+    "&end=20500101";
+  const res = await fetch(url, {
+    headers: { "User-Agent": UA, Referer: "https://quote.eastmoney.com/" },
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!res.ok) throw new Error("东方财富 HTTP " + res.status);
+  const json: unknown = await res.json();
+  const data = (json as { data?: { name?: string; klines?: string[] } })?.data;
+  const klines = data?.klines;
+  if (!Array.isArray(klines) || klines.length === 0) {
+    throw new Error("该代码没有不复权日线数据（可能不存在、已退市或不属于沪深 A 股）");
+  }
+  const rows: Row[] = [];
+  for (const line of klines) {
+    const p = line.split(",");
+    const value = Number(p[2]);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(p[0]) && Number.isFinite(value) && value > 0) rows.push([p[0], value]);
+  }
+  if (rows.length < 30) throw new Error("日线样本不足 30 条，无法计算红利指标");
+  const name = typeof data?.name === "string" && data.name.trim() ? data.name.trim() : code;
+  return { name, rows };
+}
+
+/** 腾讯不复权日线（kline/kline，单页上限 640 条，按最早日期向前翻页补全 2015 起） */
+async function fetchTencentDividendDaily(code: string): Promise<{ name: string; rows: Row[] }> {
+  const symbol = tencentSymbol(code);
+  const byDate = new Map<string, number>();
+  let name = "";
+  let end = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
+  for (let page = 0; page < 5; page++) {
+    const url =
+      "https://web.ifzq.gtimg.cn/appstock/app/kline/kline?param=" +
+      encodeURIComponent(`${symbol},day,2015-01-01,${end},640`);
+    const res = await fetch(url, {
+      headers: { "User-Agent": UA, Referer: "https://gu.qq.com/" },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) throw new Error("腾讯行情 HTTP " + res.status);
+    const json = (await res.json()) as {
+      data?: Record<string, { day?: string[][]; qt?: Record<string, string[]> }>;
+    };
+    const block = json.data?.[symbol];
+    const list = block?.day;
+    if (!name) {
+      const qt = block?.qt?.[symbol]?.[1];
+      if (typeof qt === "string" && qt.trim()) name = qt.trim();
+    }
+    if (!Array.isArray(list) || list.length === 0) {
+      if (page === 0) throw new Error("该代码没有日线数据（可能不存在、已退市或不属于沪深 A 股）");
+      break;
+    }
+    let earliest = "";
+    for (const p of list) {
+      const date = String(p?.[0] ?? "");
+      const value = Number(p?.[2]);
+      if (/^\d{4}-\d{2}-\d{2}$/.test(date) && Number.isFinite(value) && value > 0) {
+        byDate.set(date, value);
+        if (!earliest || date < earliest) earliest = date;
+      }
+    }
+    if (!earliest || earliest <= "2015-01-05") break;
+    const next = dateMinusOneDay(earliest);
+    if (next >= end) break;
+    end = next;
+  }
+  const rows: Row[] = [...byDate.entries()]
+    .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+    .map(([date, value]) => [date, value] as Row);
+  if (rows.length < 30) throw new Error("日线样本不足 30 条，无法计算红利指标");
+  return { name: name || code, rows };
+}
+
+/** 东方财富分红明细（税前每 10 股派息），按除息日升序；无记录时返回空数组 */
+async function fetchDividendRecords(code: string): Promise<DividendRecordData[]> {
+  const url =
+    "https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_SHAREBONUS_DET&columns=ALL&filter=" +
+    encodeURIComponent(`(SECURITY_CODE="${code}")`) +
+    "&pageNumber=1&pageSize=200&sortColumns=EX_DIVIDEND_DATE&sortTypes=-1&source=WEB&client=WEB";
+  let lastErr: unknown = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetch(url, {
+        headers: { "User-Agent": UA, Referer: "https://data.eastmoney.com/" },
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!res.ok) throw new Error("东方财富分红 HTTP " + res.status);
+      const json = (await res.json()) as {
+        success?: boolean;
+        message?: string;
+        result?: { data?: unknown[] } | null;
+      };
+      if (json.success === false) {
+        const message = json.message || "东方财富分红接口拒绝请求";
+        // 东财对「该代码没有任何分红记录」返回 success:false + 返回数据为空，按空记录处理而非抓取失败
+        if (/返回数据为空|暂无数据|没有找到|无数据/.test(message)) return [];
+        throw new Error(message);
+      }
+      if (!json.result) return [];
+      const list = json.result.data;
+      if (!Array.isArray(list)) return [];
+      return list
+        .map((raw) => {
+          const r = (raw ?? {}) as Record<string, unknown>;
+          const exDate = String(r.EX_DIVIDEND_DATE ?? "").slice(0, 10);
+          const dps = Number(r.PRETAX_BONUS_RMB) / 10;
+          return {
+            exDate,
+            dps: Math.round(dps * 10000) / 10000,
+            plan: String(r.IMPL_PLAN_PROFILE ?? ""),
+            reportDate: String(r.REPORT_DATE ?? "").slice(0, 10),
+            progress: String(r.ASSIGN_PROGRESS ?? ""),
+          };
+        })
+        .filter((r) => /^\d{4}-\d{2}-\d{2}$/.test(r.exDate) && Number.isFinite(r.dps) && r.dps > 0)
+        .sort((a, b) => (a.exDate < b.exDate ? -1 : 1));
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw new Error("分红明细抓取失败：" + String((lastErr as Error)?.message ?? lastErr).slice(0, 80));
+}
+
+/** 日线 → 周线：按周一归组，保留每周最后一个交易日的日期与收盘价 */
+function weeklyFromDaily(rows: Row[]): Row[] {
+  const map = new Map<string, Row>();
+  for (const [date, close] of rows) {
+    const key = weekKeyOf(date);
+    const prev = map.get(key);
+    if (!prev || date > prev[0]) map.set(key, [date, close]);
+  }
+  return [...map.values()].sort((a, b) => (a[0] < b[0] ? -1 : 1));
+}
+
+async function fetchDividendDaily(code: string): Promise<{ name: string; rows: Row[]; fallback: boolean }> {
+  try {
+    const primary = await fetchEastmoneyDividendDaily(code);
+    return { ...primary, fallback: false };
+  } catch (primary) {
+    try {
+      const fallback = await fetchTencentDividendDaily(code);
+      return { ...fallback, fallback: true };
+    } catch (err) {
+      const a = String((primary as Error)?.message ?? primary).slice(0, 80);
+      const b = String((err as Error)?.message ?? err).slice(0, 80);
+      throw new Error(`东方财富：${a}；腾讯：${b}`);
+    }
+  }
+}
+
+async function loadExtraDividendStock(
+  code: string,
+): Promise<{ entry: DividendStockSeries | null; info: DividendInfo | null; error: string | null }> {
+  const now = Date.now();
+  const cached = dividendExtraCache.get(code);
+  if (cached && now - cached.at < DIVIDEND_EXTRA_TTL_MS) return { entry: cached.entry, info: cached.info, error: null };
+  const failed = dividendExtraErrors.get(code);
+  if (failed && now - failed.at < DIVIDEND_EXTRA_ERROR_TTL_MS) return { entry: null, info: null, error: failed.error };
+  let task = dividendExtraInflight.get(code);
+  if (!task) {
+    task = (async () => {
+      const [daily, dividends] = await Promise.all([fetchDividendDaily(code), fetchDividendRecords(code)]);
+      const weekly = weeklyFromDaily(daily.rows);
+      if (weekly.length < 60) throw new Error(`周线样本不足 60 条（仅 ${weekly.length} 条），无法计算红利指标`);
+      return { name: daily.name, weekly, dividends };
+    })().finally(() => dividendExtraInflight.delete(code));
+    dividendExtraInflight.set(code, task);
+  }
+  try {
+    const data = await task;
+    const secid = stockSecid(code);
+    const note = data.dividends.length
+      ? DIVIDEND_EXTRA_NOTE
+      : "手动添加：未取到公开分红记录，股息率维度为「暂无」，仅按价格与周线规则评估";
+    const entry: DividendStockSeries = {
+      code,
+      name: data.name || code,
+      sector: EXTRA_SECTOR,
+      secid,
+      note,
+      weekly: data.weekly,
+      dividends: data.dividends,
+    };
+    const info: DividendInfo = {
+      code,
+      name: entry.name,
+      sector: entry.sector,
+      secid,
+      note,
+      from: data.weekly[0][0],
+      to: data.weekly[data.weekly.length - 1][0],
+      rows: data.weekly.length,
+    };
+    dividendExtraCache.set(code, { at: Date.now(), entry, info });
+    dividendExtraErrors.delete(code);
+    return { entry, info, error: null };
+  } catch (err) {
+    const msg = String((err as Error)?.message ?? err).slice(0, 160);
+    dividendExtraErrors.set(code, { at: Date.now(), error: msg });
+    return { entry: null, info: null, error: msg };
+  }
+}
+
+export interface ExtraDividendResolution {
+  infos: DividendInfo[];
+  stocks: Record<string, DividendStockSeries>;
+  errors: Record<string, string>;
+  status: SourceStatus;
+}
+
+/** 解析并加载手动添加的红利股；失败只影响该代码，不阻塞基础清单 */
+export async function resolveExtraDividendStocks(codes: string[]): Promise<ExtraDividendResolution> {
+  const unique = [...new Set(codes.filter(isSupportedStockCode))];
+  const loaded = await Promise.all(unique.map(loadExtraDividendStock));
+  const infos: DividendInfo[] = [];
+  const stocks: Record<string, DividendStockSeries> = {};
+  const errors: Record<string, string> = {};
+  unique.forEach((code, i) => {
+    const r = loaded[i];
+    if (r.entry && r.info) {
+      infos.push(r.info);
+      stocks[code] = r.entry;
+    } else {
+      errors[code] = r.error ?? "加载失败";
+    }
+  });
+  const ok = Object.keys(stocks).length;
+  return {
+    infos,
+    stocks,
+    errors,
+    status: {
+      id: "dividend_extra",
+      label: "手动添加红利股（东方财富 / 腾讯按需抓取）",
+      kind: "price",
+      mode: "live",
+      ok: ok === unique.length,
+      note: `${ok}/${unique.length} 只已加载，内存缓存 10 分钟；不写入快照、不保存自选列表`,
+    },
+  };
+}
+
+/** 基础红利清单 + 本次请求手动添加的个股（按需抓取，缓存 10 分钟） */
+export async function getDividendDataset(opts: { refresh?: boolean; extras?: string[] } = {}): Promise<DividendDataset> {
+  const base = await getBaseDividendDataset(opts.refresh === true);
+  const extras = [...new Set(opts.extras ?? [])].filter((c) => isSupportedStockCode(c) && !base.stocks[c]);
+  if (!extras.length) return base;
+  const resolved = await resolveExtraDividendStocks(extras);
+  const stocks = { ...base.stocks, ...resolved.stocks };
+  return {
+    ...base,
+    stocks,
+    statuses: [...base.statuses, resolved.status],
+    asOf: dividendAsOf(stocks),
+    updatedAt: Date.now(),
+    extraInfos: resolved.infos,
+    extraErrors: Object.keys(resolved.errors).length ? resolved.errors : undefined,
+  };
+}
+
+export function dividendInfos(): DividendInfo[] {
+  return dividendSnapshot.stocks.map((s) => ({
+    code: s.code,
+    name: s.name,
+    sector: s.sector,
+    secid: s.secid,
+    note: s.note,
+    from: s.weekly[0][0],
+    to: s.weekly[s.weekly.length - 1][0],
+    rows: s.weekly.length,
+  }));
+}
+
+export function dividendMeta() {
+  return {
+    source: dividendSnapshot.source,
+    generatedAt: dividendSnapshot.generatedAt,
+    window: dividendSnapshot.window,
   };
 }

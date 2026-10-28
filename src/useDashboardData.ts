@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   BASE,
   ApiError,
+  EXTRA_DIVIDEND_LIMIT,
+  EXTRA_DIVIDEND_STORAGE_KEY,
   EXTRA_STOCK_LIMIT,
   EXTRA_STOCK_STORAGE_KEY,
   isValidStockCode,
@@ -9,6 +11,7 @@ import {
   requestJson,
   type AiContextPayload,
   type DiagnosisPayload,
+  type DividendListPayload,
   type EventsPayload,
   type EventStudyPayload,
   type HealthPayload,
@@ -45,9 +48,15 @@ export interface DashboardState {
   stocksSignals: StocksSignalsPayload | null;
   stocksError: string | null;
   stocksLoading: boolean;
+  dividendList: DividendListPayload | null;
+  dividendError: string | null;
+  dividendLoading: boolean;
   /** 手动添加的个股代码，只保存在本机浏览器 */
   extraStockCodes: string[];
   setExtraStockCodes: (codes: string[]) => void;
+  /** 红利策略手动添加的个股代码，与个股诊断分开保存 */
+  dividendExtraCodes: string[];
+  setDividendExtraCodes: (codes: string[]) => void;
   fetchedAt: number | null;
   reload: () => void;
 }
@@ -60,6 +69,19 @@ function readExtraStockCodes(): string[] {
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
     return [...new Set(parsed.filter((x): x is string => typeof x === "string" && isValidStockCode(x)))].slice(0, EXTRA_STOCK_LIMIT);
+  } catch {
+    return [];
+  }
+}
+
+/** 读取本机手动添加的红利股（键与个股诊断分开） */
+function readDividendExtraCodes(): string[] {
+  try {
+    const raw = localStorage.getItem(EXTRA_DIVIDEND_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return [...new Set(parsed.filter((x): x is string => typeof x === "string" && isValidStockCode(x)))].slice(0, EXTRA_DIVIDEND_LIMIT);
   } catch {
     return [];
   }
@@ -85,7 +107,11 @@ export function useDashboardData(controls: Controls): DashboardState {
   const [stocksSignals, setStocksSignals] = useState<StocksSignalsPayload | null>(null);
   const [stocksLoading, setStocksLoading] = useState(true);
   const [stocksError, setStocksError] = useState<string | null>(null);
+  const [dividendList, setDividendList] = useState<DividendListPayload | null>(null);
+  const [dividendLoading, setDividendLoading] = useState(true);
+  const [dividendError, setDividendError] = useState<string | null>(null);
   const [extraStockCodes, setExtraStockCodesState] = useState<string[]>(readExtraStockCodes);
+  const [dividendExtraCodes, setDividendExtraCodesState] = useState<string[]>(readDividendExtraCodes);
   const [fetchedAt, setFetchedAt] = useState<number | null>(null);
 
   const setExtraStockCodes = useCallback((codes: string[]) => {
@@ -93,6 +119,16 @@ export function useDashboardData(controls: Controls): DashboardState {
     setExtraStockCodesState(clean);
     try {
       localStorage.setItem(EXTRA_STOCK_STORAGE_KEY, JSON.stringify(clean));
+    } catch {
+      /* 无痕模式下存不下，仅当前会话有效 */
+    }
+  }, []);
+
+  const setDividendExtraCodes = useCallback((codes: string[]) => {
+    const clean = [...new Set(codes.filter(isValidStockCode))].slice(0, EXTRA_DIVIDEND_LIMIT);
+    setDividendExtraCodesState(clean);
+    try {
+      localStorage.setItem(EXTRA_DIVIDEND_STORAGE_KEY, JSON.stringify(clean));
     } catch {
       /* 无痕模式下存不下，仅当前会话有效 */
     }
@@ -227,6 +263,34 @@ export function useDashboardData(controls: Controls): DashboardState {
     };
   }, [stocksQs, token]);
 
+  // 红利策略清单：基础清单 + 本机手动添加的代码，与所选指数无关
+  const dividendQs = useMemo(
+    () => `${studyQs}${dividendExtraCodes.length ? `&extra=${encodeURIComponent(dividendExtraCodes.join(","))}` : ""}`,
+    [studyQs, dividendExtraCodes],
+  );
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let alive = true;
+    setDividendLoading(true);
+    setDividendError(null);
+    requestJson<DividendListPayload>(`${BASE}/api/dividend/list${dividendQs}`, controller.signal)
+      .then((d) => {
+        if (alive) setDividendList(d);
+      })
+      .catch((err) => {
+        if (!alive || (err as Error)?.name === "AbortError") return;
+        setDividendError(err instanceof ApiError ? `${err.code}: ${err.message}` : String(err));
+      })
+      .finally(() => {
+        if (alive) setDividendLoading(false);
+      });
+    return () => {
+      alive = false;
+      controller.abort();
+    };
+  }, [dividendQs, token]);
+
   return {
     loading,
     error,
@@ -245,8 +309,13 @@ export function useDashboardData(controls: Controls): DashboardState {
     stocksSignals,
     stocksError,
     stocksLoading,
+    dividendList,
+    dividendError,
+    dividendLoading,
     extraStockCodes,
     setExtraStockCodes,
+    dividendExtraCodes,
+    setDividendExtraCodes,
     fetchedAt,
     reload,
   };

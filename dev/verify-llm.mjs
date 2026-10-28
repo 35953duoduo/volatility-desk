@@ -7,8 +7,11 @@ import {
   MODEL_OPTIONS,
   LlmError,
   SYSTEM_PROMPT,
+  DIVIDEND_SYSTEM,
+  buildDividendPrompt,
   buildUserPrompt,
   diagnose,
+  diagnoseDividend,
   endpointFor,
   extractReportEvents,
   fetchPage,
@@ -289,7 +292,84 @@ check("AI 补充 JSON 截断时重试一次并成功", briefTrunc.hits.length ==
 check("AI 补充重试改用高推理档位", briefTrunc.hits[1].body.effort === "high", String(briefTrunc.hits[1].body.effort));
 await expectCode("AI 补充没有密钥时不发请求", () => summarizeBrief({ apiKey: "", model: DEFAULT_MODEL, baseUrl: DEFAULT_BASE_URL }, { topic: "VIX", context: "x", searchText: "" }, recorder(() => okResponse(BRIEF)).fetch), "missing_key");
 
+/* ===== 7. 红利策略辅助诊断：底仓 / 卫星仓框架与五档结论 ===== */
 
+const DIVGOOD = JSON.stringify({
+  stance: "trim",
+  confidence: 0.57,
+  summary: "年度股息率处于 5 年低位、价格在 3 年高位，卫星仓宜分批高抛，底仓继续收息。",
+  basePosition: "底仓保留 70%–80%，不参与周线波段。",
+  satellitePlan: "卫星仓每次反弹减持 1/3，最多减到只剩底仓。",
+  tranches: [
+    { trigger: "现价高于 60 周均线 12%", action: "减持卫星仓", ratio: "1/3" },
+    { trigger: "周线 RSI 上破 70", action: "再减持一次", ratio: "1/3" },
+  ],
+  reasons: ["年度股息率 3.62%，5 年分位 0%", "价格处于 3 年 99.7% 分位"],
+  risks: ["分红方案下调", "除息缺口"],
+  dividendView: "FY2025 分红已实施，过渡期一年三次派息使 TTM 口径偏高。",
+  dataGaps: ["缺少派息率与自由现金流"],
+});
+
+await expectCode("红利空数据包不出题", async () => buildDividendPrompt("   ", ""), "missing_context");
+const dprompt = buildDividendPrompt("# 红利数据\n年度股息率 3.62%", "关心股息可持续性");
+check("红利提示词包含侧重与数据", dprompt.includes("关心股息可持续性") && dprompt.includes("3.62%"));
+check(
+  "红利系统提示固定底仓/卫星仓框架",
+  DIVIDEND_SYSTEM.includes("不是指令") &&
+    DIVIDEND_SYSTEM.includes("accumulate/add/hold/trim/reduce") &&
+    DIVIDEND_SYSTEM.includes("卫星仓") &&
+    DIVIDEND_SYSTEM.includes("不得建议一次性满仓或清仓"),
+);
+
+const drec = recorder(() => okResponse(DIVGOOD));
+const dres = await diagnoseDividend({ apiKey: SECRET, model: "deepseek-flash", baseUrl: DEFAULT_BASE_URL }, { markdown: "# 红利数据\n年度股息率 3.62%", focus: "关心股息可持续性" }, drec.fetch);
+check("红利请求只打一次官方接口", drec.hits.length === 1 && drec.hits[0].url === "https://api.deepseek.com/chat/completions");
+check("红利请求带系统提示与数据包", drec.hits[0].body.messages[0].role === "system" && drec.hits[0].body.messages[1].content.includes("3.62%"));
+check("红利输出预算足够推理模型", drec.hits[0].body.max_tokens === 4500 && drec.hits[0].body.effort === "low");
+check(
+  "红利结论映射五档与底仓/卫星仓",
+  dres.analysis.stance === "trim" &&
+    dres.analysis.tranches.length === 2 &&
+    dres.analysis.basePosition.includes("70%") &&
+    dres.analysis.satellitePlan.includes("卫星仓") &&
+    dres.analysis.dividendView.includes("TTM"),
+);
+check("红利诊断用量与免责", dres.usage.totalTokens === 1820 && dres.disclaimer.includes("不构成投资建议") && dres.contextChars > 0);
+
+const dpromptPlain = recorder(() => okResponse(DIVGOOD));
+await diagnoseDividend({ apiKey: SECRET, model: "gpt-4o-mini", baseUrl: "https://proxy.example.com" }, { markdown: "x" }, dpromptPlain.fetch);
+check("红利非推理模型用较小预算", dpromptPlain.hits[0].body.max_tokens === 1800);
+
+const dtrunc = (() => {
+  const hits = [];
+  return {
+    hits,
+    fetch: async (url, init) => {
+      hits.push({ url, init, body: JSON.parse(init.body) });
+      return hits.length === 1 ? okResponse('{"stance":"trim","confidence":0.5,"summary":"x') : okResponse(DIVGOOD);
+    },
+  };
+})();
+const dretried = await diagnoseDividend({ apiKey: SECRET, model: DEFAULT_MODEL, baseUrl: DEFAULT_BASE_URL }, { markdown: "x" }, dtrunc.fetch);
+check("红利 JSON 被截断时自动重试一次", dtrunc.hits.length === 2 && dretried.analysis.stance === "trim");
+check("红利重试改用高推理档位", dtrunc.hits[1].body.effort === "high");
+
+for (const [name, bad] of [
+  ["红利结论越界", DIVGOOD.replace('"stance":"trim"', '"stance":"all-in"')],
+  ["红利置信度越界", DIVGOOD.replace('"confidence":0.57', '"confidence":1.7')],
+  ["红利缺少底仓建议", DIVGOOD.replace(/"basePosition":"[^"]*",/, "")],
+  ["红利档位不是数组", DIVGOOD.replace(/"tranches":\[[^\]]*\]/, '"tranches":"一次减完"')],
+]) {
+  const rec = recorder(() => okResponse(bad));
+  await expectCode("拒绝" + name, () => diagnoseDividend({ apiKey: SECRET, model: DEFAULT_MODEL, baseUrl: DEFAULT_BASE_URL }, { markdown: "x" }, rec.fetch), "bad_payload");
+  check("拒绝" + name + " 时最多重试一次", rec.hits.length <= 2, "hits=" + rec.hits.length);
+}
+
+await expectCode(
+  "红利诊断没有密钥时不发请求",
+  () => diagnoseDividend({ apiKey: "", model: DEFAULT_MODEL, baseUrl: DEFAULT_BASE_URL }, { markdown: "x" }, recorder(() => okResponse(DIVGOOD)).fetch),
+  "missing_key",
+);
 
 console.log("\n" + pass + "/" + (pass + fail) + " 通过，总耗时 " + (Date.now() - t0) + "ms");
 if (fail) process.exitCode = 1;

@@ -2,7 +2,10 @@
 const BASE = process.env.BASE ?? "http://127.0.0.1:8000/functions/v1/app";
 
 const cases = [
-  { path: "/health", want: (d) => d.ok === true && Array.isArray(d.sources) && d.sources.length >= 4 },
+  {
+    path: "/health",
+    want: (d) => d.ok === true && Array.isArray(d.sources) && d.sources.length >= 4 && d.dividend.count === 16 && d.dividend.window.from < d.dividend.window.to,
+  },
   {
     path: "/api/symbols",
     want: (d) => d.symbols.length === 6 && d.symbols.every((s) => s.rows > 100) && ["SSE", "CSI300"].every((k) => d.symbols.some((s) => s.key === k)),
@@ -117,7 +120,120 @@ const cases = [
     path: "/api/stocks/history?code=600000&refresh=0",
     want: (d) => d.stock.code === "600000" && d.stock.name === "浦发银行" && d.count > 1000 && d.signals.length === 8 && Boolean(d.composite),
   },
-  { path: "/docs", want: (d) => d.endpoints.length === 13 && d.endpoints.every((e) => e.method === "GET") && Object.keys(d.commonParams).length === 4 && d.basePath.includes("/functions/v1/app") && d.data_quality_notes.length >= 7 },
+  {
+    path: "/api/dividend/list?refresh=0",
+    want: (d) =>
+      d.count === 16 &&
+      d.stocks.length === 16 &&
+      d.stocks[0].rank === 1 &&
+      d.stocks.every((s, i) => (i === 0 || d.stocks[i - 1].score >= s.score)) &&
+      d.stocks.every(
+        (s) =>
+          s.close > 0 &&
+          s.yieldFY > 0 &&
+          s.rows > 200 &&
+          ["accumulate", "add", "hold", "trim", "reduce"].includes(s.stanceKey) &&
+          typeof s.summary === "string" &&
+          typeof s.actionHint === "string",
+      ) &&
+      d.strategy.weights.length === 5 &&
+      Math.abs(d.strategy.weights.reduce((a, w) => a + w.weight, 0) - 100) < 1e-6 &&
+      d.strategy.position.base.includes("70%") &&
+      d.summary.count === 16,
+  },
+  {
+    path: "/api/dividend/history?code=601398&refresh=0",
+    want: (d) =>
+      d.stock.code === "601398" &&
+      d.stock.name === "工商银行" &&
+      d.count > 400 &&
+      d.fields.includes("yieldFY") &&
+      d.fields.includes("pricePct3y") &&
+      d.series.at(-1).close > 0 &&
+      d.metrics.yieldFY > 0 &&
+      d.metrics.yieldPct5y >= 0 &&
+      d.metrics.yieldPct5y <= 100 &&
+      d.metrics.pricePct3y >= 0 &&
+      d.metrics.pricePct3y <= 100 &&
+      d.metrics.streakYears >= 10 &&
+      d.signals.length === 5 &&
+      Math.abs(d.signals.reduce((a, s) => a + s.weight, 0) - 100) < 1e-6 &&
+      d.dividends.length >= 10 &&
+      Boolean(d.composite) &&
+      Object.keys(d.definition).length >= 6 &&
+      Boolean(d.strategy.definitionLabels.yieldFY),
+  },
+  { path: "/api/dividend/history?code=999999", status: 400 },
+  {
+    path: "/api/dividend/list?refresh=0&extra=600000",
+    want: (d) =>
+      d.count === 17 &&
+      d.meta.baseCount === 16 &&
+      d.meta.extras.join() === "600000" &&
+      d.meta.extraErrors === undefined &&
+      d.stocks.some(
+        (s) =>
+          s.code === "600000" &&
+          s.name === "浦发银行" &&
+          s.sector === "手动添加" &&
+          s.close > 0 &&
+          s.rows > 200 &&
+          s.yieldFY > 0,
+      ),
+  },
+  {
+    path: "/api/dividend/history?code=600000&refresh=0",
+    want: (d) =>
+      d.stock.code === "600000" &&
+      d.stock.sector === "手动添加" &&
+      d.count > 200 &&
+      d.metrics.yieldFY > 0 &&
+      d.signals.length === 5 &&
+      d.dividends.length > 0 &&
+      d.meta.extras.includes("600000"),
+  },
+  {
+    path: "/api/dividend/ai-context?code=600000&format=markdown&refresh=0",
+    want: (d) => d.markdown.includes("浦发银行") && d.markdown.includes("手动添加") && d.bundle.subject.code === "600000",
+  },
+  { path: "/api/dividend/list?refresh=0&extra=999999", status: 400 },
+  {
+    path: "/api/dividend/list?refresh=0&extra=000001,000002,000004,000005,000006,000007,000008",
+    status: 400,
+  },
+  {
+    path: "/api/dividend/ai-context?code=601398&format=markdown&refresh=0",
+    want: (d) =>
+      d.format === "markdown" &&
+      d.markdown.includes("红利策略上下文") &&
+      d.markdown.includes("五项规则") &&
+      d.markdown.includes("数据来源与口径") &&
+      d.markdown.includes("年度股息率（主口径）") &&
+      d.bundle.taskForAssistant.requiredOutput.length === 7 &&
+      d.bundle.taskForAssistant.guardrails.length === 4 &&
+      d.bundle.meta.liveRefresh === false,
+  },
+  {
+    path: "/api/dividend/ai-context?code=601398&format=json&refresh=0",
+    want: (d) =>
+      d.format === "json" &&
+      d.bundle.subject.code === "601398" &&
+      d.bundle.strategy.weights.length === 5 &&
+      d.bundle.metrics.yieldFY > 0 &&
+      d.bundle.signals.length === 5 &&
+      d.bundle.dividends.length <= 10 &&
+      d.bundle.api.aiContext.includes("/api/dividend/ai-context"),
+  },
+  {
+    path: "/docs",
+    want: (d) =>
+      d.endpoints.length === 16 &&
+      d.endpoints.every((e) => e.method === "GET") &&
+      Object.keys(d.commonParams).length === 4 &&
+      d.basePath.includes("/functions/v1/app") &&
+      d.data_quality_notes.length >= 18 &&
+      d.endpoints.some((e) => e.path.endsWith("/api/dividend/list")),
+  },
   { path: "/api/volatility/history?symbol=NDX100&years=3&refresh=0", want: (d) => d.meta.liveRefresh === false },
   { path: "/api/nope", status: 404 },
   { path: "/api/events/study?symbols=BOGUS", status: 400 },

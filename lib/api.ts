@@ -317,6 +317,9 @@ export interface PanicPayload {
 /** 手动添加个股：一次最多 6 只，只支持沪市 60/68、深市 00/30 开头的 6 位代码 */
 export const EXTRA_STOCK_LIMIT = 6;
 export const EXTRA_STOCK_STORAGE_KEY = "vol-desk-extra-stocks";
+/** 红利策略的手动添加清单与个股诊断分开保存，互不影响 */
+export const EXTRA_DIVIDEND_LIMIT = 6;
+export const EXTRA_DIVIDEND_STORAGE_KEY = "vol-desk-extra-dividends";
 
 export function isValidStockCode(code: string): boolean {
   return /^(60|68|00|30)\d{4}$/.test(code);
@@ -438,6 +441,175 @@ export interface StockHistoryPayload {
   weighting: StockWeighting;
   series: (VolPointRow & { kospi: number | null })[];
   disclaimer: string;
+}
+
+/* ===== 红利策略（国企高分红股 · 周线高抛低吸） ===== */
+
+export interface DividendSnapshotMeta {
+  source: string;
+  generatedAt: string;
+  window: { from: string; to: string };
+}
+
+export interface DividendMeta {
+  service: string;
+  version: string;
+  liveRefresh: boolean;
+  asOf: string;
+  snapshot: DividendSnapshotMeta;
+  /** 基础清单数量（不含手动添加） */
+  baseCount?: number;
+  /** 本次请求手动添加的代码 */
+  extras?: string[];
+  /** 手动添加代码的抓取失败原因 */
+  extraErrors?: Record<string, string>;
+  sources: SourceStatus[];
+}
+
+export interface DividendStrategy {
+  title: string;
+  horizon: string;
+  method: string;
+  weights: { id: string; name: string; weight: number }[];
+  position: { base: string; satellite: string };
+  definition: Record<string, string>;
+  definitionLabels: Record<string, string>;
+}
+
+export interface DividendRecord {
+  exDate: string;
+  dps: number;
+  plan: string;
+  reportDate: string;
+  progress: string;
+}
+
+export interface DividendMetricsPayload {
+  asOf: string;
+  close: number;
+  weekChangePct: number | null;
+  yieldFY: number | null;
+  dpsFY: number | null;
+  fy: number | null;
+  dpsTTM: number | null;
+  yieldTTM: number | null;
+  yieldPct5y: number | null;
+  yieldPctAll: number | null;
+  pricePct3y: number | null;
+  pricePct5y: number | null;
+  rsi14w: number | null;
+  ma20w: number | null;
+  ma60w: number | null;
+  distMa20w: number | null;
+  distMa60w: number | null;
+  drawdown3y: number | null;
+  weekVol52: number | null;
+  streakYears: number;
+  dividendYears: number;
+  dividendCount: number;
+  latestDividend: DividendRecord | null;
+  weekPartial: boolean;
+}
+
+export interface DividendSignalRow {
+  id: string;
+  name: string;
+  display: string;
+  state: string;
+  score: number;
+  weight: number;
+  rationale: string;
+}
+
+export interface DividendCompositeRow {
+  score: number;
+  stance: string;
+  stanceKey: "accumulate" | "add" | "hold" | "trim" | "reduce";
+  summary: string;
+  actionHint: string;
+  basePosition: string;
+  satellite: string;
+}
+
+export interface DividendStockInfo {
+  code: string;
+  name: string;
+  sector: string;
+  secid: string;
+  note: string;
+  from: string;
+  to: string;
+  rows: number;
+}
+
+export interface DividendListRow extends DividendStockInfo {
+  rank: number;
+  asOf: string | null;
+  close: number | null;
+  weekChangePct: number | null;
+  yieldFY: number | null;
+  yieldPct5y: number | null;
+  yieldTTM: number | null;
+  pricePct3y: number | null;
+  rsi14w: number | null;
+  ma20w: number | null;
+  ma60w: number | null;
+  distMa60w: number | null;
+  drawdown3y: number | null;
+  streakYears: number;
+  weekPartial: boolean;
+  score: number;
+  stance: string;
+  stanceKey: DividendCompositeRow["stanceKey"];
+  summary: string;
+  actionHint: string;
+}
+
+export interface DividendListPayload {
+  ok: boolean;
+  meta: DividendMeta;
+  summary: { count: number; lowBuy: number; highSell: number; neutral: number; avgYield: number | null };
+  strategy: DividendStrategy;
+  count: number;
+  stocks: DividendListRow[];
+  disclaimer: string;
+}
+
+export interface DividendPointRow {
+  date: string;
+  close: number;
+  ma20w: number | null;
+  ma60w: number | null;
+  rsi14w: number | null;
+  yieldFY: number | null;
+  yieldTTM: number | null;
+  yieldPct5y: number | null;
+  pricePct3y: number | null;
+  drawdown3y: number | null;
+}
+
+export interface DividendHistoryPayload {
+  ok: boolean;
+  meta: DividendMeta;
+  stock: DividendStockInfo;
+  fields: string[];
+  count: number;
+  metrics: DividendMetricsPayload;
+  composite: DividendCompositeRow;
+  signals: DividendSignalRow[];
+  dividends: DividendRecord[];
+  series: DividendPointRow[];
+  strategy: DividendStrategy;
+  definition: Record<string, string>;
+  disclaimer: string;
+}
+
+export interface DividendAiContextPayload {
+  ok: boolean;
+  meta: DividendMeta & { kind: string; code: string; name: string };
+  format: string;
+  markdown?: string;
+  bundle: Record<string, unknown>;
 }
 
 export class ApiError extends Error {

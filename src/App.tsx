@@ -9,6 +9,7 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
 import ApiConsole from "@/src/panels/ApiConsole";
 import Diagnosis from "@/src/panels/Diagnosis";
+import Dividend from "@/src/panels/Dividend";
 import Overview from "@/src/panels/Overview";
 import ReportStudy from "@/src/panels/ReportStudy";
 import Stocks from "@/src/panels/Stocks";
@@ -63,7 +64,7 @@ export default function App() {
                 <span className="text-[11px] font-normal text-muted-foreground">Nasdaq + A-Share Volatility Desk</span>
               </h1>
               <p className="mt-1.5 text-xs text-muted-foreground">
-                纳斯达克与 A 股主要指数的波动率多年走势、VIX 恐慌指数、历史规律与量化买卖诊断，A 股个股五档建议（含韩国综合指数联动与动态权重），另附大摩 A 股报告复盘，并对外提供只读 API。
+                纳斯达克与 A 股主要指数的波动率多年走势、VIX 恐慌指数、历史规律与量化买卖诊断，A 股个股五档建议（含韩国综合指数联动与动态权重），另设国企红利股周线高抛低吸与大摩 A 股报告复盘，并对外提供只读 API。
               </p>
               <div className="mt-2 flex flex-wrap items-center gap-1.5">
                 {sources.length === 0 ? (
@@ -188,6 +189,9 @@ export default function App() {
             <TabsTrigger value="stocks" className="rounded-t-md px-3 text-sm data-[state=active]:bg-secondary/60">
               个股诊断
             </TabsTrigger>
+            <TabsTrigger value="dividend" className="rounded-t-md px-3 text-sm data-[state=active]:bg-secondary/60">
+              红利策略
+            </TabsTrigger>
             <TabsTrigger value="report" className="rounded-t-md px-3 text-sm data-[state=active]:bg-secondary/60">
               大摩报告复盘
             </TabsTrigger>
@@ -215,6 +219,15 @@ export default function App() {
               onExtraCodesChange={data.setExtraStockCodes}
             />
           </TabsContent>
+          <TabsContent value="dividend" className="mt-1">
+            <Dividend
+              list={data.dividendList}
+              loading={data.dividendLoading}
+              error={data.dividendError}
+              extraCodes={data.dividendExtraCodes}
+              onExtraCodesChange={data.setDividendExtraCodes}
+            />
+          </TabsContent>
           <TabsContent value="report" className="mt-1">
             <ReportStudy study={data.eventsStudy} loading={data.studyLoading} error={data.studyError} activeSymbol={symbol} />
           </TabsContent>
@@ -226,8 +239,10 @@ export default function App() {
         <footer className="mt-6 border-t border-border/60 pt-3 pb-8 text-[11px] leading-relaxed text-muted-foreground">
           <p>
             数据口径：指数、ETF 与 A 股个股的日线收盘价来自东方财富公开行情接口（快照生成于 {fmtDate(data.history?.meta.snapshot.generatedAt)}），
-            运行时尝试增量刷新；VXN / VIX 隐含波动率以 CBOE / Yahoo 上游为准，不可达时接口与页面都会显式标注，改用真实收盘价计算 21 / 63
-            日年化已实现波动率（sqrt(252)）。个股建议的规则权重按历史信息系数动态取值，韩国综合指数仅作为个股诊断的区域联动信号。
+            运行时尝试增量刷新；国企红利股的周线为东方财富不复权日线（失败回退腾讯），分红来自东方财富分红送配明细（税前），
+            周线快照生成于 {fmtDate(data.dividendList?.meta.snapshot.generatedAt)}，运行时用东方财富批量报价覆盖本周最新价。VXN / VIX
+            隐含波动率以 CBOE / Yahoo 上游为准，不可达时接口与页面都会显式标注，改用真实收盘价计算 21 / 63 日年化已实现波动率（sqrt(252)）。
+            个股建议的规则权重按历史信息系数动态取值，韩国综合指数仅作为个股诊断的区域联动信号；红利策略使用固定权重，详见该页「数据来源与更新频率」。
           </p>
           <p className="mt-1.5">
             所有内容仅为量化统计与信息展示，用于研究与自我决策，不构成投资建议、收益承诺或个性化推荐。

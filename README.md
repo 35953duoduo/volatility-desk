@@ -1,10 +1,12 @@
 # 波动率观测台（Nasdaq + A-Share Volatility Desk）
 
-基于 React / TypeScript / Vite / Tailwind 的波动率与个股诊断看板，配套严格只读的分析 Function：VIX 恐慌指数、纳斯达克与 A 股指数波动率历史、A 股个股五档买卖建议（含 KOSPI 区域联动与 IC 动态权重）、大摩报告复盘，以及浏览器直连 DeepSeek 的 AI 背景补充（自带密钥，站点不代持任何密钥）。
+仓库：[github.com/35953duoduo/volatility-desk](https://github.com/35953duoduo/volatility-desk)
 
-站点由三部分组成：`src/` 的六标签可视化面板（波动率总览 / 历史规律 / 买卖诊断 / 个股诊断 / 大摩报告复盘 / API 接口）、`functions/` 的只读分析接口，以及 `functions/data/snapshot.ts` 的真实行情快照。前端骨架与组件目录源自 Qoder Sites React 起始模板，模板归属、第三方样式许可见 [PROVENANCE.md](PROVENANCE.md) 与 `vendor/`。
+基于 React / TypeScript / Vite / Tailwind 的波动率与个股诊断看板，配套严格只读的分析 Function：VIX 恐慌指数、纳斯达克与 A 股指数波动率历史、A 股个股五档买卖建议（含 KOSPI 区域联动与 IC 动态权重）、国企红利股周线高抛低吸（长期收息 + 卫星仓波段）、大摩报告复盘，以及浏览器直连 DeepSeek 的 AI 背景补充与买卖诊断（自带密钥，站点不代持任何密钥）。
 
-数据口径：指数、ETF 与 A 股个股日线收盘价来自东方财富公开接口（手动添加的个股在东方财富失败时回退腾讯分页日线），快照由 `node dev/fetch-data.mjs` 重新生成（NDX100 自 2019-04、IXIC 与 SPX 自 2015-01、QQQ 自 2001-01、上证指数与沪深300 自 2015-01，另含 `functions/data/watchlist.ts` 中 5 只 A 股个股与韩国综合指数 KOSPI）。VXN / VIX 隐含波动率在运行时尝试 CBOE / Yahoo 上游，不可达时接口与页面都会显式标注 `ok:false`，诊断改用真实收盘价计算的 21 / 63 日年化已实现波动率。核心计算集中在 `functions/analytics.ts`（波动率序列、分位、Z 分数、10 条规则信号、历史分位表现、波动率×趋势矩阵、事件研究、个股 8 条规则与 IC 动态权重），路由与 AI 上下文打包在 `functions/handler.ts`。
+站点由三部分组成：`src/` 的七标签可视化面板（波动率总览 / 历史规律 / 买卖诊断 / 个股诊断 / 红利策略 / 大摩报告复盘 / API 接口）、`functions/` 的只读分析接口，以及 `functions/data/snapshot.ts`、`functions/data/dividendSnapshot.ts` 的真实行情与分红快照。前端骨架与组件目录源自 Qoder Sites React 起始模板，模板归属、第三方样式许可见 [PROVENANCE.md](PROVENANCE.md) 与 `vendor/`。
+
+数据口径：指数、ETF 与 A 股个股日线收盘价来自东方财富公开接口（手动添加的个股在东方财富失败时回退腾讯分页日线），快照由 `node dev/fetch-data.mjs` 重新生成（NDX100 自 2019-04、IXIC 与 SPX 自 2015-01、QQQ 自 2001-01、上证指数与沪深300 自 2015-01，另含 `functions/data/watchlist.ts` 中 5 只 A 股个股与韩国综合指数 KOSPI）。红利股的周线与分红来自另一份快照 `functions/data/dividendSnapshot.ts`，由 `node dev/fetch-dividend-data.mjs` 生成；手动添加的红利个股在运行时按需抓取，不写入该快照。VXN / VIX 隐含波动率在运行时尝试 CBOE / Yahoo 上游，不可达时接口与页面都会显式标注 `ok:false`，诊断改用真实收盘价计算的 21 / 63 日年化已实现波动率。核心计算集中在 `functions/analytics.ts`（波动率序列、分位、Z 分数、10 条规则信号、历史分位表现、波动率×趋势矩阵、事件研究、个股 8 条规则与 IC 动态权重）与 `functions/dividend.ts`（年度股息率、股息率分位、3 年价格分位、周线 RSI、60 周均线偏离、连续分红与固定权重五档），路由与 AI 上下文打包在 `functions/handler.ts`。完整来源、更新节奏与实时性边界见下文「数据来源与更新节奏」。
 
 VIX 恐慌指数：`/api/volatility/panic` 返回标普500 30 天隐含波动率水平、5 年 / 全样本分位、Z 分数与波动状态；每个标的的「波动率总览」顶部固定展示该面板，数据独立于所选指数。上游（CBOE CSV / Yahoo）不可达时接口显式 `available:false` 并给出各探测源的原因，页面用琥珀色降级框说明并回落到已实现波动率，绝不伪造读数。
 
@@ -12,9 +14,28 @@ VIX 恐慌指数：`/api/volatility/panic` 返回标普500 30 天隐含波动率
 
 手动添加个股：排行表上方可添加任意沪深 A 股（沪市 60 / 68、深市 00 / 30 开头，最多 6 只），代码列表只写入本机 `localStorage`（键 `vol-desk-extra-stocks`），请求时以 GET 参数 `extra=600000,000001` 传给 `list` / `signals`，`history?code=` 也支持任意受支持的代码。服务端按需抓取 2015 年以来的前复权日线，东方财富优先、失败回退腾讯分页（每页 640 条、最多 5 页），并以东方财富批量报价把现价补到最新交易日；结果只在内存缓存 10 分钟（失败缓存 60 秒），不写入快照、不保存任何账户或自选数据。单个代码抓取失败只影响该行，并在接口与页面上显式标注原因。
 
+红利策略（国企高分红股 · 周线高抛低吸）：`functions/data/dividendWatchlist.ts` 维护 16 只国企 / 中央国企背景的高分红样本（银行、保险、公用事业、能源、通信、交运），`functions/dividend.ts` 用不复权周线计算年度股息率（最近一个已实施完整年度、含中期+末期）、股息率 5 年分位、3 年价格分位、周线 RSI(14)、60 周均线偏离与连续分红年数，并按固定权重（股息率分位 30% + 3 年价格分位 25% + 周线 RSI 20% + 60 周均线偏离 15% + 连续分红 10%）给出五档（≥30 分批低吸 / ≥10 小仓低吸 / -10~10 持有收息 / -30~-10 分批高抛 / ≤-30 显著高抛）。刻意不使用个股诊断的动态 IC：周线序列自相关强、有效独立样本少，动态优化容易把噪音当规律。仓位框架固定为「底仓 70%–80% 长期收息 + 卫星仓 20%–30% 只做周线波段」，五档结论只作用于卫星仓，底仓不因波段信号清仓。接口为 `/api/dividend/list`、`/api/dividend/history?code=`、`/api/dividend/ai-context?code=&format=`；「红利策略」标签含排行表、周线价格与 MA20w/MA60w、股息率历史与分位、五项规则明细、最近 10 条分红、数据来源说明，以及只针对卫星仓的 DeepSeek 辅助诊断（`lib/deepseek.ts` 的 `diagnoseDividend`，输出 `stance / confidence / summary / basePosition / satellitePlan / tranches / reasons / risks / dividendView / dataGaps`）。快照生成：`node dev/fetch-dividend-data.mjs`（东方财富不复权日线优先，失败回退腾讯分页；分红取东方财富 `RPT_SHAREBONUS_DET` 税前每 10 股派息）。
+
+红利手动添加个股：与个股诊断的交互一致，「红利策略」排行表上方可添加任意沪深 A 股（沪市 60 / 68、深市 00 / 30 开头，最多 6 只），代码列表只写入本机 `localStorage`（键 `vol-desk-extra-dividends`，与个股诊断的 `vol-desk-extra-stocks` 相互独立）。请求时以 GET 参数 `extra=600000,601398` 传给 `/api/dividend/list`，响应用 `meta.baseCount` / `meta.extras` / `meta.extraErrors` 区分基础样本、手动代码与抓取失败原因；`/api/dividend/history?code=` 与 `/api/dividend/ai-context?code=` 也接受任意受支持代码。服务端按需抓取 2015 年以来的不复权日线与东方财富分红明细（日线东方财富优先、失败回退腾讯分页，分红沿用税前每 10 股派息），重采样为周线后与基础 16 只用同一套规则计算；成功缓存 10 分钟、失败缓存 60 秒，不写入快照、不保存自选列表。手动添加的个股不一定属于国企红利样本，只按公开行情与分红数据计算，不构成对其分红持续性的判断；无公开分红记录时年度股息率显示「暂无完整年度分红」，仅按价格与周线规则评估。单个代码抓取失败只影响该行，并在接口与页面上显式标注原因。
+
+### 数据来源与更新节奏
+
+| 数据 | 来源 | 更新方式 | 实时性与边界 |
+| --- | --- | --- | --- |
+| 指数 / ETF / A 股个股日线 | 东方财富公开 K 线接口（`push2his.eastmoney.com`，前复权），手动添加的个股失败时回退腾讯分页日线 | `node dev/fetch-data.mjs` 生成 `functions/data/snapshot.ts`；运行时按需抓取个股并缓存 10 分钟 | 日线在收盘后才有最终值；盘中只用东方财富批量报价补最新价，不是逐笔或毫秒级 |
+| 韩国综合指数 KOSPI | 东方财富日线，随个股快照一起生成 | 同上 | 只作为个股诊断的区域联动信号，不单独给建议 |
+| 红利股周线 | 东方财富不复权日线（`fqt=0`，2015 起），失败回退腾讯不复权日线；按每周最后一个交易日重采样；手动添加的个股在运行时按需抓取 | `node dev/fetch-dividend-data.mjs` 生成 `functions/data/dividendSnapshot.ts`；手动添加的个股在请求时抓取并缓存 10 分钟（失败 60 秒）；开启「实时上游」时用东方财富批量报价覆盖本周最新 K 线 | 周线包含除息缺口；本周 K 线在周末收盘前不是最终值（接口标记 `weekPartial`）；手动添加的个股不写入快照 |
+| 红利股分红 | 东方财富数据中心 `RPT_SHAREBONUS_DET`（税前每 10 股派息），按除息日进入计算；手动添加的个股同样按需抓取 | 随红利快照生成；手动添加的个股在请求时抓取并缓存 10 分钟；新方案实施后需重跑脚本 | 年度股息率只认已实施完整年度；近 12 个月现金口径仅参考，银行中期+末期过渡期可能一年三次派息；不保证未来分红 |
+| 盘中最新报价 | 东方财富批量行情（`push2.eastmoney.com`） | 每次请求且 `refresh=1` 时拉取；缓存 5 分钟 | 有延迟，可能停牌或缺失；失败时显式降级为本地快照 |
+| VIX / VXN 隐含波动率 | CBOE CSV / Yahoo 上游 | 运行时探测，不可达时接口返回 `available:false` 与各源原因 | 不可达时绝不伪造读数，改用真实收盘价计算的 21 / 63 日已实现波动率 |
+| 大摩报告事件 | `functions/data/events.ts` 人工整理公开报道；「实时抓取」由 DeepSeek 网页搜索 / 抓取生成 | 人工表随代码更新；AI 结果只存本机 `localStorage`（`vol-desk-reports`） | 人工表非穷举；AI 抓取未经人工核对，只作线索 |
+| DeepSeek 辅助诊断 / 背景补充 | 浏览器直连 `https://api.deepseek.com`，使用访问者自己的 API Key | 点击时实时调用，单次、非流式、60 秒超时 | 密钥只存本机 `localStorage`（`vol-desk-llm`）；站点服务端不代持、不转发、不记录；模型输出可能有错 |
+
+没有任何逐笔、Level-2 或毫秒级实时行情；所有页面都展示数据截至日期与来源状态，接口在 `/docs` 的 18 条 `data_quality_notes` 中同步声明这些限制（含红利手动添加按需抓取、失败原因与不写快照）。红利策略未纳入盈利、派息率、自由现金流、利率、监管与行业景气等因素，AI 诊断被要求显式说明这些数据缺口。
+
 大摩报告复盘：`functions/data/events.ts` 人工整理 7 份有明确日期与公开来源的摩根士丹利中国 / A 股策略报告（含目标位调整与来源链接，标注可信度，非穷举）；`/api/events` 返回事件表，`/api/events/study` 以上证与沪深300 为样本，计算报告日后首个交易日锚定的 T−20→T+60 累计收益路径、1/5/20/60/120 日前向收益、60 日峰谷、按立场分组的汇总与无条件基准；A 股标的的 `api/ai-context` 会附带同一份复盘摘要。在此之外，「大摩报告复盘」标签顶部有「实时抓取大摩最新报告」：用 DeepSeek 官方网页搜索（`POST /v1/tools/search`）与抓取（`POST /v1/tools/fetch`）接口检索最新报道、抓取正文，再让 DeepSeek 提取成结构化事件（材料截断为检索结果 6000 字 + 最多 3 页 × 12000 字，推理模型给 8000 `max_tokens`；若正文仍被思维链截断或 JSON 未闭合，会压缩到 2 页 × 8000 字并提高推理档位重试一次），并用真实日线收盘价在浏览器端计算上证与沪深300 的报告后 1/5/20/60 日前向收益；结果标注「AI 抓取 · 未经人工核对」，只存本机 `localStorage`（键 `vol-desk-reports`），不写入服务端。
 
-DeepSeek 辅助诊断（自带密钥，浏览器直连）：`lib/deepseek.ts` 是纯前端适配器，服务端不代持任何大模型密钥。在「买卖诊断」标签的 AI 卡片点「添加模型」，填入自己的 DeepSeek 官方 API Key（模型名与接口地址可改，默认 `deepseek-flash` / `https://api.deepseek.com`，卡片里可一键点选官方在用的 `deepseek-flash` 与 `deepseek-v4-pro`；旧名 `deepseek-chat`、`deepseek-reasoner` 已下线，填了会被 400 拒绝，错误提示会直接说明），配置只写进本机 `localStorage`（键 `vol-desk-llm`），页面上永远只显示掩码（前 6 位 + 后 4 位）；「清除密钥」即彻底删除。点「调用 DeepSeek 诊断」时，浏览器把 `api/ai-context` 返回的 Markdown 上下文连同关注点一起作为 user 消息，直接 `POST https://api.deepseek.com/chat/completions`（`Authorization: Bearer <自己的密钥>`、`credentials:"omit"`、强制 HTTPS，仅回环地址允许 `http` 以便离线测试），单次、非流式、不自动重放、60 秒超时（唯一例外：正文为空或 JSON 解析失败时改用默认推理档位重试一次，最多两次请求）；密钥不经过站点 Function，也不出现在任何日志或响应体中。响应按固定 JSON 结构（`stance` 五档 `buy/add/hold/trim/reduce`、`confidence`、`summary`、`reasons`、`risks`、`scenarios.volUp/volDown`、`dataGaps`）容错解析，兼容 ```json 代码块与前后夹带的说明文字，解析失败时保留原始文本供排查。上游状态码统一映射成中文提示（401 密钥被拒 / 402 余额不足 / 429 限流 / 5xx 上游故障），且不回显上游正文。DeepSeek 官方接口允许浏览器跨域直连（实测预检回显 Origin 并放行 `authorization,content-type`），因此无需中转。注意 DeepSeek V4 系列是推理模型：会先输出思维链再出正文，连接测试与诊断都预留了更大的 `max_tokens` 预算，官方接口再配 `effort:"low"` 压低思维链；若模型偶发截断 JSON，诊断会自动改用默认推理档位重试一次。网页搜索（`/v1/tools/search`）与抓取（`/v1/tools/fetch`）同样是浏览器直连、消耗访问者额度。服务端随之保持严格只读：`/api/ai/status`、`/api/ai/analyze` 已下线，任何非 GET/HEAD 请求返回 405，站点设置里不需要配置任何 Secret。未添加密钥时卡片只提示「添加模型」，诊断上下文本身仍可免费复制 / 下载或喂给别的模型。
+DeepSeek 辅助诊断（自带密钥，浏览器直连）：`lib/deepseek.ts` 是纯前端适配器，服务端不代持任何大模型密钥。在「买卖诊断」标签的 AI 卡片点「添加模型」，填入自己的 DeepSeek 官方 API Key（模型名与接口地址可改，默认 `deepseek-flash` / `https://api.deepseek.com`，卡片里可一键点选官方在用的 `deepseek-flash` 与 `deepseek-v4-pro`；旧名 `deepseek-chat`、`deepseek-reasoner` 已下线，填了会被 400 拒绝，错误提示会直接说明），配置只写进本机 `localStorage`（键 `vol-desk-llm`），页面上永远只显示掩码（前 6 位 + 后 4 位）；「清除密钥」即彻底删除。点「调用 DeepSeek 诊断」时，浏览器把 `api/ai-context` 返回的 Markdown 上下文连同关注点一起作为 user 消息，直接 `POST https://api.deepseek.com/chat/completions`（`Authorization: Bearer <自己的密钥>`、`credentials:"omit"`、强制 HTTPS，仅回环地址允许 `http` 以便离线测试），单次、非流式、不自动重放、60 秒超时（唯一例外：正文为空或 JSON 解析失败时改用默认推理档位重试一次，最多两次请求）；密钥不经过站点 Function，也不出现在任何日志或响应体中。响应按固定 JSON 结构（`stance` 五档 `buy/add/hold/trim/reduce`、`confidence`、`summary`、`reasons`、`risks`、`scenarios.volUp/volDown`、`dataGaps`）容错解析，兼容 ```json 代码块与前后夹带的说明文字，解析失败时保留原始文本供排查。上游状态码统一映射成中文提示（401 密钥被拒 / 402 余额不足 / 429 限流 / 5xx 上游故障），且不回显上游正文。DeepSeek 官方接口允许浏览器跨域直连（实测预检回显 Origin 并放行 `authorization,content-type`），因此无需中转。注意 DeepSeek V4 系列是推理模型：会先输出思维链再出正文，连接测试与诊断都预留了更大的 `max_tokens` 预算，官方接口再配 `effort:"low"` 压低思维链；若模型偶发截断 JSON，诊断会自动改用默认推理档位重试一次。「红利策略」标签下的「DeepSeek 红利诊断」复用同一份本机密钥（`vol-desk-llm`），运行时先取 `/api/dividend/ai-context?format=markdown`，再让模型只针对卫星仓输出五档结论、底仓处理、分批触发条件与股息可持续性判断；输出结构与买卖诊断不同，但同样只接受固定 JSON、失败最多重试一次、绝不经过站点服务端。网页搜索（`/v1/tools/search`）与抓取（`/v1/tools/fetch`）同样是浏览器直连、消耗访问者额度。服务端随之保持严格只读：`/api/ai/status`、`/api/ai/analyze` 已下线，任何非 GET/HEAD 请求返回 405，站点设置里不需要配置任何 Secret。未添加密钥时卡片只提示「添加模型」，诊断上下文本身仍可免费复制 / 下载或喂给别的模型。
 
 AI 背景补充（VIX / KOSPI）：两个面板底部各有「用 DeepSeek 补充信息」。点击后浏览器先用 DeepSeek 官方网页搜索（`POST /v1/tools/search`）检索公开报道，再把「本站真实指标（唯一数值依据）+ 检索材料」交给 DeepSeek 输出结构化摘要（`headline / summary / bullets / watch / caveats`），并列出可点击来源；检索失败会自动降级为仅依据本站指标的解读，不阻塞主流程。结果缓存 30 分钟于本机 `localStorage`（键 `vol-desk-brief-VIX` / `vol-desk-brief-KOSPI`），可重复查看或重新生成。明确边界：DeepSeek 不是行情数据源，系统提示与界面都要求不得编造任何数值、日期、机构或链接，所有数值以本站接口为准，摘要固定标注「AI 摘要可能有错」。
 
@@ -25,11 +46,12 @@ AI 背景补充（VIX / KOSPI）：两个面板底部各有「用 DeepSeek 补�
 | 命令 | 作用 |
 | --- | --- |
 | `node dev/fetch-data.mjs` | 重新抓取行情并覆盖 `functions/data/snapshot.ts`（含观察清单个股与 KOSPI），同时探测 VIX / VXN 上游 |
+| `node dev/fetch-dividend-data.mjs` | 抓取基础 16 只红利股的东方财富不复权日线（失败回退腾讯）与分红明细，重采样为周线并覆盖 `functions/data/dividendSnapshot.ts`（手动添加的个股由运行时按需抓取） |
 | `node dev/function-local.mjs` | 用 Node 的类型剥离直接跑 `functions/handler.ts`，无需 Deno，监听 `127.0.0.1:8000`（可用 `PORT` 覆盖） |
 | `npm run dev` | Vite 开发服务，`/functions/v1/app` 代理到 8000 |
 | `node dev/preview-server.mjs` | 以生产构建产物 `dist/` 提供同源预览，监听 `127.0.0.1:4173`；它在进程内 import `functions/handler.ts`，改完 Function 源码后需要重启才会生效 |
-| `node dev/verify-api.mjs` | 对 Function 逐路由回归（33 个用例）：状态码、JSON 结构、CORS、`application/json`、HEAD/405/204、`/docs` 端点数量（13 个且全为 GET）、VIX 可用/降级两种形态、个股列表/信号/历史与非法代码 400、手动添加（去重 / 非法 / 超限 / 按需抓取）、服务端 AI 路由已下线；其中按需抓取自选股的 2 个用例需要外网 |
-| `node --experimental-strip-types dev/verify-llm.mjs` | 对 `lib/deepseek.ts` 的 79 个用例（用注入的 fetch 记录器，不触真实付费接口）：配置读写与掩码不泄漏密钥、HTTPS 与回环地址校验、默认模型名与官方在用名称一致、提示词组装、容错 JSON 解析、每个失败分支只请求一次且不重放、状态码→中文提示映射、连接测试与推理模型的 token 预算、截断自动重试、网页搜索 / 抓取 / 报告提取的端点、字段映射与材料压缩重试、VIX / KOSPI 背景补充的提示词约束、预算与重试 |
+| `node dev/verify-api.mjs` | 对 Function 逐路由回归（43 个用例）：状态码、JSON 结构、CORS、`application/json`、HEAD/405/204、`/docs` 端点数量（16 个且全为 GET）与 18 条数据质量说明、VIX 可用/降级两种形态、个股列表/信号/历史与非法代码 400、个股手动添加（去重 / 非法 / 超限 / 按需抓取）、红利清单/详情/AI 上下文/非法代码 400/固定权重校验、红利手动添加（`extra` 合并、任意代码详情、AI 上下文、非法与超限 400、按需抓取）、服务端 AI 路由已下线；其中按需抓取自选股与红利手动添加的 5 个用例需要外网 |
+| `node --experimental-strip-types dev/verify-llm.mjs` | 对 `lib/deepseek.ts` 的 99 个用例（用注入的 fetch 记录器，不触真实付费接口）：配置读写与掩码不泄漏密钥、HTTPS 与回环地址校验、默认模型名与官方在用名称一致、提示词组装、容错 JSON 解析、每个失败分支只请求一次且不重放、状态码→中文提示映射、连接测试与推理模型的 token 预算、截断自动重试、网页搜索 / 抓取 / 报告提取的端点、字段映射与材料压缩重试、VIX / KOSPI 背景补充的提示词约束、预算与重试、红利诊断的底仓/卫星仓提示词、五档映射、预算与截断重试 |
 | `node dev/mock-deepseek.mjs` | 回环的 DeepSeek 兼容 mock（默认 `127.0.0.1:8123`，带 CORS 预检、缺 Bearer 返回 401）。把「添加模型」里的接口地址填成它，即可在不消耗 token 的情况下验证诊断卡片与 AI 背景补充的完整渲染路径 |
 
 本机未安装 Deno，因此 `npm run check:function` 未执行；Function 兼容性目前由 Node 适配器验证（Deno 与 Node 均实现 WHATWG `Request`/`Response`），部署后的真实运行结果仍需一次线上请求确认。

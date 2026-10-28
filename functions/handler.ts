@@ -32,7 +32,10 @@ import {
   EXTRA_STOCK_LIMIT,
   SNAPSHOT_META,
   SYMBOLS,
+  dividendInfos,
+  dividendMeta,
   getDataset,
+  getDividendDataset,
   getStockDataset,
   isSupportedStockCode,
   kospiMeta,
@@ -41,10 +44,17 @@ import {
   symbolConfig,
   symbolKeys,
 } from "./datasource.ts";
+import {
+  DIVIDEND_DISCLAIMER,
+  DIVIDEND_STRATEGY,
+  buildDividendSeries,
+  dividendMetrics,
+  dividendSignals,
+} from "./dividend.ts";
 import { EVENTS_PROVENANCE, REPORT_BROKER, reportEvents } from "./data/events.ts";
 import { WATCHLIST_NOTE } from "./data/watchlist.ts";
 
-const VERSION = "1.5.0";
+const VERSION = "1.7.0";
 const ROUTE_ROOTS = ["api", "health", "docs"];
 
 /** A 股主要指数：大摩报告复盘的默认研究标的 */
@@ -167,7 +177,7 @@ function docsPayload() {
     ok: true,
     service: "nasdaq-volatility-api",
     version: VERSION,
-    description: "波动率只读分析接口（美股科技指数 + A 股主要指数 + A 股个股）：真实行情快照 + 运行时实时上游，输出波动率序列、规则信号、量化诊断、大摩 A 股报告事件复盘、VIX 恐慌指数，以及带动态 IC 权重与韩国综合指数联动的个股五档建议，并可生成可直接投喂大模型的上下文包。",
+    description: "波动率只读分析接口（美股科技指数 + A 股主要指数 + A 股个股 + 国企红利股）：真实行情快照 + 运行时实时上游，输出波动率序列、规则信号、量化诊断、大摩 A 股报告事件复盘、VIX 恐慌指数、带动态 IC 权重与韩国综合指数联动的个股五档建议，以及红利股的周线高抛低吸与股息率分析，并可生成可直接投喂大模型的上下文包。",
     auth: "全部接口公开只读（GET / HEAD），无需凭据、已开启跨域，便于 AI 工具 / MCP 客户端直接调用；服务端不代持大模型密钥，也不接受任何写操作。",
     basePath: "/functions/v1/app",
     commonParams: {
@@ -257,6 +267,30 @@ function docsPayload() {
         returns: "{ ok, meta, stock, fields[], count, metrics, composite, signals[], series[{date,close,rv21,...,kospi}] }",
       },
       {
+        path: "/functions/v1/app/api/dividend/list",
+        method: "GET",
+        purpose: "国企红利股观察清单：不复权周线、股息率分位、3 年价格分位、周线 RSI 与五档高抛低吸建议；可用 extra 附加任意沪深 A 股",
+        params: {
+          refresh: "1=用东方财富批量报价覆盖本周最新价（默认），0=仅用本地周线快照",
+          extra: "手动添加的 6 位代码，逗号分隔，最多 6 只；按需抓取不复权日线与分红明细，缓存 10 分钟",
+        },
+        returns: "{ ok, meta, count, summary, strategy, stocks[{rank,code,name,sector,close,weekChangePct,yieldFY,yieldPct5y,pricePct3y,rsi14w,ma60w,score,stance,stanceKey,actionHint}] }",
+      },
+      {
+        path: "/functions/v1/app/api/dividend/history",
+        method: "GET",
+        purpose: "单只红利股的周线序列、分红明细、五项规则与五档建议（长期底仓 + 卫星仓框架）；支持红利清单之外的沪深 A 股",
+        params: { code: `6 位股票代码（基础清单 ${dividendInfos().map((s) => s.code).join(" | ")}，或任意沪市 60/68、深市 00/30 代码）` },
+        returns: "{ ok, meta, stock, fields[], count, metrics, composite, signals[], dividends[], series[], strategy, disclaimer }",
+      },
+      {
+        path: "/functions/v1/app/api/dividend/ai-context",
+        method: "GET",
+        purpose: "为 DeepSeek 辅助诊断生成红利策略上下文（价值投资 / 长期收息 / 卫星仓高抛低吸）",
+        params: { code: "6 位股票代码（红利清单或任意沪市 60/68、深市 00/30 代码）", format: "markdown（默认，可直接粘贴给模型）| json（结构化）" },
+        returns: "{ ok, meta, format, markdown | bundle }",
+      },
+      {
         path: "/functions/v1/app/api/ai-context",
         method: "GET",
         purpose: "为 AI 辅助买卖诊断准备的上下文包",
@@ -272,7 +306,13 @@ function docsPayload() {
       "A 股无对应 VXN 的连续隐含波动率序列，因此上证 / 沪深300 的波动率一律用收盘价计算的已实现波动率。",
       "个股清单来自 functions/data/watchlist.ts（前复权日线，东方财富）；运行时以批量行情把最新价并入最新交易日，交易日锚定上证指数最新 K 线日期。",
       "手动添加的个股通过 GET 参数 extra=code1,code2 触发（最多 6 只，仅沪市 60/68 与深市 00/30）：服务端按需抓取 2015 起的前复权日线并内存缓存 10 分钟，不写入快照或数据库；单只失败只影响该代码并返回 error 字段。",
+      "红利策略同样支持手动添加任意沪深 A 股（extra=code1,code2，最多 6 只）：服务端按需抓取 2015 起的不复权日线与东方财富分红明细（失败回退腾讯日线），缓存 10 分钟且不写入快照；单个代码失败只影响该行并在 meta.extraErrors 中说明原因。手动添加的个股不一定属于国企红利样本，其股息率与规则结果只按公开数据计算。",
       "个股建议的规则权重不是固定常数：每条规则用全历史「未来 63 日收益 / 规则多空状态」估计信息系数 IC，|IC| 截断到 [0.5, 3] 后归一化为合计 100%，随数据更新自动变化。",
+      "红利策略清单（/api/dividend/*）聚焦国企 / 中央国企背景的高分红标的，行情为不复权周线（每周最后一个交易日收盘），分红来自东方财富分红明细（税前每 10 股派息），周线快照由 node dev/fetch-dividend-data.mjs 生成；运行时用东方财富批量报价覆盖本周最新价。",
+      "红利股息率以「最近一个已实施完整年度（中期+末期，必要时含特别分红）」的税前每股分红 ÷ 当前不复权价计算；另有近 365 天现金口径。红利股改为中期+末期派息后，过渡期近 12 个月可能出现三次派息，不能直接年化。",
+      "红利策略使用固定权重（股息率分位 30% + 3 年价格分位 25% + 周线 RSI 20% + 60 周均线偏离 15% + 连续分红 10%），不做动态 IC：周线自相关强、独立样本少，动态优化容易过拟合。底仓 70%–80% 与卫星仓 20%–30% 是通用框架，不是个性化配置。",
+      "所有红利统计未考虑红利税、交易成本、股息再投资与个人持仓成本；历史分红不保证未来继续，量化输出不构成投资建议。",
+      "数据更新节奏：指数与个股日线在收盘后更新，盘中报价来自东方财富批量行情（有延迟、可能停牌或缺失）；分红明细在方案实施后更新；没有任何逐笔或毫秒级实时行情。",
       "韩国综合指数（KOSPI）只作为个股诊断中的区域联动信号（63 日收益相关性 + beta），不单独作为标的。",
       "大摩报告事件表为人工整理的公开报道，非穷举；每条带来源与可靠性标注，报告日按其后最近交易日对齐。",
       "本站服务端不代持任何大模型密钥，也不提供模型转发接口：AI 辅助诊断由浏览器直连 DeepSeek 官方接口，使用访问者自己的 API Key，消耗其本人账户的额度。",
@@ -297,6 +337,11 @@ async function handleHealth(): Promise<Response> {
       count: stockInfos().length,
       kospi: Boolean(kospiMeta()),
       note: WATCHLIST_NOTE,
+    },
+    dividend: {
+      count: dividendInfos().length,
+      generatedAt: dividendMeta().generatedAt,
+      window: dividendMeta().window,
     },
     sources: live.statuses,
   });
@@ -636,6 +681,193 @@ function fmtPct(v: number | null): string {
   return `${v > 0 ? "+" : ""}${v.toFixed(2)}%`;
 }
 
+/* ===================== 红利策略 ===================== */
+
+const DIVIDEND_HISTORY_FIELDS = [
+  "date",
+  "close",
+  "ma20w",
+  "ma60w",
+  "rsi14w",
+  "yieldFY",
+  "yieldTTM",
+  "yieldPct5y",
+  "pricePct3y",
+  "drawdown3y",
+];
+
+const DIVIDEND_LIMITS = [
+  "行情为不复权周线（每周最后一个交易日收盘），包含除息缺口；不是逐笔或毫秒级实时行情。",
+  "股息率使用税前分红，未考虑红利税、交易成本、股息再投资与个人持仓成本。",
+  "股息率按最近一个已实施完整年度计算，不含尚未公布的年度分红；历史分红不保证未来继续。",
+  "未纳入盈利、派息率、自由现金流、利率、监管与行业景气等因素。",
+  "观察清单为人工维护的国企 / 中央国企红利样本，不是全市场红利指数，也不构成推荐。",
+];
+
+interface DividendStockView {
+  info: ReturnType<typeof dividendInfos>[number];
+  series: ReturnType<typeof buildDividendSeries>;
+  dividends: { exDate: string; dps: number; plan: string; reportDate: string; progress: string }[];
+  metrics: ReturnType<typeof dividendMetrics>;
+  composite: ReturnType<typeof dividendSignals>["composite"];
+  signals: ReturnType<typeof dividendSignals>["signals"];
+}
+
+function dividendView(info: ReturnType<typeof dividendInfos>[number], entry: Parameters<typeof buildDividendSeries>[0]): DividendStockView {
+  const series = buildDividendSeries(entry);
+  const metrics = dividendMetrics(series, entry.dividends);
+  const result = dividendSignals(series, entry.dividends);
+  return { info, series, dividends: entry.dividends, metrics, composite: result.composite, signals: result.signals };
+}
+
+function dividendListRow(view: DividendStockView, rank: number) {
+  const m = view.metrics;
+  return {
+    rank,
+    ...view.info,
+    asOf: m?.asOf ?? null,
+    close: m?.close ?? null,
+    weekChangePct: m?.weekChangePct ?? null,
+    yieldFY: m?.yieldFY ?? null,
+    yieldPct5y: m?.yieldPct5y ?? null,
+    yieldTTM: m?.yieldTTM ?? null,
+    pricePct3y: m?.pricePct3y ?? null,
+    rsi14w: m?.rsi14w ?? null,
+    ma20w: m?.ma20w ?? null,
+    ma60w: m?.ma60w ?? null,
+    distMa60w: m?.distMa60w ?? null,
+    drawdown3y: m?.drawdown3y ?? null,
+    streakYears: m?.streakYears ?? 0,
+    weekPartial: m?.weekPartial ?? false,
+    score: view.composite.score,
+    stance: view.composite.stance,
+    stanceKey: view.composite.stanceKey,
+    summary: view.composite.summary,
+    actionHint: view.composite.actionHint,
+  };
+}
+
+function dividendListSummary(rows: { score: number; yieldFY: number | null }[]) {
+  const yields = rows.map((r) => r.yieldFY).filter((v): v is number => v !== null && Number.isFinite(v));
+  return {
+    count: rows.length,
+    lowBuy: rows.filter((r) => r.score >= 10).length,
+    highSell: rows.filter((r) => r.score <= -10).length,
+    neutral: rows.filter((r) => r.score > -10 && r.score < 10).length,
+    avgYield: yields.length ? Math.round((yields.reduce((a, b) => a + b, 0) / yields.length) * 100) / 100 : null,
+  };
+}
+
+function dividendAiBundle(view: DividendStockView, statuses: { id: string; label: string; mode: string; ok: boolean; note: string }[], refresh: boolean) {
+  const m = view.metrics!;
+  const code = view.info.code;
+  const bundle = {
+    meta: {
+      service: "nasdaq-volatility-api",
+      version: VERSION,
+      kind: "dividend-strategy",
+      asOf: m.asOf,
+      generatedAt: new Date().toISOString(),
+      liveRefresh: refresh,
+      snapshot: dividendMeta(),
+      sources: statuses,
+    },
+    subject: {
+      code,
+      name: view.info.name,
+      sector: view.info.sector,
+      note: view.info.note,
+      close: m.close,
+      weekPartial: m.weekPartial,
+    },
+    strategy: DIVIDEND_STRATEGY,
+    metrics: m,
+    signals: view.signals,
+    composite: view.composite,
+    dividends: view.dividends.slice(-10),
+    limits: DIVIDEND_LIMITS,
+    taskForAssistant: {
+      role: `你是长期价值与红利策略顾问。请基于以上真实数据，判断${view.info.name}（${code}）的长期底仓是否继续持有，以及 20%–30% 卫星仓应低吸、持有还是高抛。`,
+      requiredOutput: [
+        "结论：分批低吸 / 小仓低吸 / 持有收息 / 分批高抛 / 显著高抛 五档之一，并明确该结论只针对卫星仓，底仓如何处理",
+        "置信度：0–1，并列出主要不确定性来源",
+        "关键依据：引用股息率分位、3 年价格分位、周线 RSI、60 周均线偏离、连续分红年数中的具体数值",
+        "分批计划：给出 2–3 档触发条件与每档比例，仅限卫星仓",
+        "股息视角：说明当前年度分红的现金覆盖与可持续性判断，并列出仍需补充的数据",
+        "风险：股价继续下跌、分红下调、除息缺口、红利税、流动性与行业监管",
+        "复评频率与失效条件：什么情况下需要重新评估结论",
+      ],
+      guardrails: [
+        "不得承诺股息率、收益或本金安全，不得把历史分红当作未来保证",
+        "不得建议一次性满仓或清仓，必须保留底仓长期收息的框架",
+        "不得编造财务数据、分红方案、机构观点或政策信息",
+        "若数据缺失或标注不可用，必须显式说明对结论的影响",
+      ],
+    },
+    api: {
+      list: "/functions/v1/app/api/dividend/list",
+      history: "/functions/v1/app/api/dividend/history?code=" + code,
+      aiContext: "/functions/v1/app/api/dividend/ai-context?code=" + code + "&format=markdown",
+    },
+  };
+  return bundle;
+}
+
+function dividendMarkdown(view: DividendStockView, bundle: ReturnType<typeof dividendAiBundle>, statuses: { label: string; mode: string; ok: boolean; note: string }[]) {
+  const m = view.metrics!;
+  const lines: string[] = [];
+  lines.push(`# 红利策略上下文（${view.info.name} ${view.info.code}）`);
+  lines.push(`数据截至 ${m.asOf}｜接口版本 ${VERSION}｜生成时间 ${new Date().toISOString()}`);
+  lines.push("");
+  lines.push("## 一、标的与核心指标");
+  lines.push(`- 行业：${view.info.sector}｜说明：${view.info.note}`);
+  lines.push(`- 不复权收盘价：${m.close}${m.weekChangePct === null ? "" : `（本周 ${fmtPct(m.weekChangePct)}）`}${m.weekPartial ? "｜本周 K 线未收盘" : ""}`);
+  lines.push(
+    `- 最新年度股息率：${m.yieldFY === null ? "暂无完整年度分红" : `${m.yieldFY.toFixed(2)}%（FY${m.fy ?? "—"}，每股税前 ${m.dpsFY ?? "—"} 元）`}`,
+  );
+  lines.push(
+    `- 近 12 个月现金口径：${m.yieldTTM === null ? "—" : `${m.yieldTTM.toFixed(2)}%`}（每股 ${m.dpsTTM ?? "—"} 元；银行等中期+末期派息过渡期可能出现一年三次，不能直接年化）`,
+  );
+  lines.push(`- 股息率分位：近 5 年 ${fmtNum(m.yieldPct5y, 0)}%｜全样本 ${fmtNum(m.yieldPctAll, 0)}%`);
+  lines.push(`- 价格分位：3 年 ${fmtNum(m.pricePct3y, 0)}%｜5 年 ${fmtNum(m.pricePct5y, 0)}%｜距 3 年高点 ${fmtPct(m.drawdown3y)}`);
+  lines.push(`- 周线 RSI(14)：${fmtNum(m.rsi14w, 1)}｜MA20w ${fmtNum(m.ma20w, 2)}｜MA60w ${fmtNum(m.ma60w, 2)}｜偏离 60 周均线 ${fmtPct(m.distMa60w)}`);
+  lines.push(`- 连续分红：${m.streakYears} 年（累计 ${m.dividendYears} 个年度有派息记录、${m.dividendCount} 条明细）｜52 周年化波动率 ${fmtNum(m.weekVol52, 1)}%`);
+  lines.push(`- 最近一次分红：${m.latestDividend ? `${m.latestDividend.exDate} 除息，每股税前 ${m.latestDividend.dps} 元，${m.latestDividend.plan}` : "—"}`);
+  lines.push("");
+  lines.push("## 二、五项规则");
+  lines.push("| 规则 | 读数 | 状态 | 分量得分 | 权重 | 说明 |");
+  lines.push("| --- | --- | --- | --- | --- | --- |");
+  for (const s of view.signals) {
+    lines.push(`| ${s.name} | ${s.display} | ${s.state} | ${s.score > 0 ? "+" : ""}${s.score} | ${s.weight}% | ${s.rationale} |`);
+  }
+  lines.push("");
+  lines.push("## 三、量化倾向");
+  lines.push(`综合得分 ${view.composite.score > 0 ? "+" : ""}${view.composite.score}／-100~+100 → ${view.composite.stance}（${view.composite.stanceKey}）`);
+  lines.push(view.composite.summary);
+  lines.push(`执行提示：${view.composite.actionHint}`);
+  lines.push(`仓位框架：${view.composite.basePosition} ${view.composite.satellite}`);
+  lines.push("");
+  lines.push("## 四、分红记录（最近 10 条，税前）");
+  lines.push("| 除息日 | 每股分红（元） | 方案 | 报告期 | 进度 |");
+  lines.push("| --- | --- | --- | --- | --- |");
+  for (const d of view.dividends.slice(-10).reverse()) {
+    lines.push(`| ${d.exDate} | ${d.dps} | ${d.plan || "—"} | ${d.reportDate || "—"} | ${d.progress || "—"} |`);
+  }
+  lines.push("");
+  lines.push("## 五、数据来源与口径");
+  for (const s of statuses) lines.push(`- ${s.label}：${s.ok ? "正常" : "降级"}（${s.mode}）— ${s.note}`);
+  for (const [k, v] of Object.entries(DIVIDEND_STRATEGY.definition)) {
+    lines.push(`- ${DIVIDEND_STRATEGY.definitionLabels[k] ?? k}：${v}`);
+  }
+  for (const l of bundle.limits) lines.push(`- ${l}`);
+  lines.push("");
+  lines.push("## 六、给 AI 的分析任务");
+  for (const r of bundle.taskForAssistant.requiredOutput) lines.push(`- ${r}`);
+  lines.push("约束：");
+  for (const g of bundle.taskForAssistant.guardrails) lines.push(`- ${g}`);
+  return lines.join("\n");
+}
+
 export async function handler(request: Request): Promise<Response> {
   const url = new URL(request.url);
   const route = resolveRoute(url.pathname);
@@ -916,6 +1148,152 @@ export async function handler(request: Request): Promise<Response> {
       });
     }
 
+    if (route === "api/dividend/list") {
+      const extrasParsed = parseExtraCodes(url);
+      if (extrasParsed.err) return extrasParsed.err;
+      const extras = extrasParsed.codes;
+      const ds = await getDividendDataset({ refresh, extras });
+      const baseInfos = dividendInfos();
+      const infos = [...baseInfos, ...(ds.extraInfos ?? [])];
+      const views = infos
+        .map((info) => {
+          const entry = ds.stocks[info.code];
+          return entry ? dividendView(info, entry) : null;
+        })
+        .filter((v): v is DividendStockView => v !== null);
+      const rows = views
+        .map((v) => dividendListRow(v, 0))
+        .sort((a, b) => b.score - a.score)
+        .map((r, i) => ({ ...r, rank: i + 1 }));
+      return json({
+        ok: true,
+        meta: {
+          service: "nasdaq-volatility-api",
+          version: VERSION,
+          liveRefresh: refresh,
+          asOf: ds.asOf,
+          snapshot: dividendMeta(),
+          baseCount: baseInfos.length,
+          extras,
+          extraErrors: ds.extraErrors,
+          sources: ds.statuses,
+        },
+        summary: dividendListSummary(rows),
+        strategy: DIVIDEND_STRATEGY,
+        count: rows.length,
+        stocks: rows,
+        disclaimer: DIVIDEND_DISCLAIMER,
+      });
+    }
+
+    if (route === "api/dividend/history") {
+      const code = (url.searchParams.get("code") ?? "").trim();
+      const baseInfo = dividendInfos().find((s) => s.code === code);
+      if (!baseInfo && !isSupportedStockCode(code)) {
+        const allowed = dividendInfos().map((s) => s.code);
+        return error(
+          "invalid_code",
+          `代码 "${code || "(空)"}" 不是支持的沪深 A 股代码（沪市 60/68、深市 00/30 开头）；红利基础清单：${allowed.join(" | ")}`,
+          400,
+          { allowed },
+        );
+      }
+      const ds = await getDividendDataset({ refresh, extras: baseInfo ? [] : [code] });
+      const info = baseInfo ?? (ds.extraInfos ?? []).find((s) => s.code === code);
+      if (!info) {
+        const reason = ds.extraErrors?.[code];
+        return error("no_data", reason ? `红利股 ${code} 按需抓取失败：${reason}` : `红利股 ${code} 未能加载，请稍后重试。`, 422, {
+          extras: [code],
+          extraErrors: ds.extraErrors,
+        });
+      }
+      const entry = ds.stocks[code];
+      if (!entry) return error("no_data", `红利股 ${code} 暂无周线快照，请运行 node dev/fetch-dividend-data.mjs 重新抓取。`, 422);
+      const view = dividendView(info, entry);
+      if (!view.metrics) return error("insufficient_data", `红利股 ${code} 的周线样本不足。`, 422);
+      const compact = view.series.map((p) => {
+        const row: Record<string, number | string | null> = {};
+        for (const f of DIVIDEND_HISTORY_FIELDS) row[f] = p[f as keyof typeof p] as number | string | null;
+        return row;
+      });
+      return json({
+        ok: true,
+        meta: {
+          service: "nasdaq-volatility-api",
+          version: VERSION,
+          liveRefresh: refresh,
+          asOf: view.metrics.asOf,
+          snapshot: dividendMeta(),
+          extras: baseInfo ? [] : [code],
+          extraErrors: ds.extraErrors,
+          sources: ds.statuses,
+        },
+        stock: info,
+        fields: DIVIDEND_HISTORY_FIELDS,
+        count: compact.length,
+        metrics: view.metrics,
+        composite: view.composite,
+        signals: view.signals,
+        dividends: view.dividends,
+        series: compact,
+        strategy: DIVIDEND_STRATEGY,
+        definition: DIVIDEND_STRATEGY.definition,
+        disclaimer: DIVIDEND_DISCLAIMER,
+      });
+    }
+
+    if (route === "api/dividend/ai-context") {
+      const code = (url.searchParams.get("code") ?? "").trim();
+      const baseInfo = dividendInfos().find((s) => s.code === code);
+      if (!baseInfo && !isSupportedStockCode(code)) {
+        const allowed = dividendInfos().map((s) => s.code);
+        return error(
+          "invalid_code",
+          `代码 "${code || "(空)"}" 不是支持的沪深 A 股代码（沪市 60/68、深市 00/30 开头）；红利基础清单：${allowed.join(" | ")}`,
+          400,
+          { allowed },
+        );
+      }
+      const ds = await getDividendDataset({ refresh, extras: baseInfo ? [] : [code] });
+      const info = baseInfo ?? (ds.extraInfos ?? []).find((s) => s.code === code);
+      if (!info) {
+        const reason = ds.extraErrors?.[code];
+        return error("no_data", reason ? `红利股 ${code} 按需抓取失败：${reason}` : `红利股 ${code} 未能加载，请稍后重试。`, 422, {
+          extras: [code],
+          extraErrors: ds.extraErrors,
+        });
+      }
+      const entry = ds.stocks[code];
+      if (!entry) return error("no_data", `红利股 ${code} 暂无周线快照。`, 422);
+      const view = dividendView(info, entry);
+      if (!view.metrics) return error("insufficient_data", `红利股 ${code} 的周线样本不足。`, 422);
+      const bundle = dividendAiBundle(view, ds.statuses, refresh);
+      const format = (url.searchParams.get("format") ?? "markdown").toLowerCase();
+      const metaPayload = {
+        service: "nasdaq-volatility-api",
+        version: VERSION,
+        kind: "dividend-strategy",
+        code,
+        name: info.name,
+        liveRefresh: refresh,
+        asOf: view.metrics.asOf,
+        snapshot: dividendMeta(),
+        extras: baseInfo ? [] : [code],
+        extraErrors: ds.extraErrors,
+        sources: ds.statuses,
+      };
+      if (format === "json") {
+        return json({ ok: true, meta: metaPayload, format: "json", bundle });
+      }
+      return json({
+        ok: true,
+        meta: metaPayload,
+        format: "markdown",
+        markdown: dividendMarkdown(view, bundle, ds.statuses),
+        bundle,
+      });
+    }
+
     if (route === "api/events") return await handleEvents();
 
     if (route === "api/events/study") return await handleEventStudy(url);
@@ -929,7 +1307,7 @@ export async function handler(request: Request): Promise<Response> {
 
     return error(
       "not_found",
-      `未知路径 "${url.pathname}"。可用：/health、/docs、/api/symbols、/api/volatility/history、/api/volatility/snapshot、/api/volatility/panic、/api/signals、/api/diagnosis、/api/stocks/list、/api/stocks/signals、/api/stocks/history、/api/events、/api/events/study、/api/ai-context`,
+      `未知路径 "${url.pathname}"。可用：/health、/docs、/api/symbols、/api/volatility/history、/api/volatility/snapshot、/api/volatility/panic、/api/signals、/api/diagnosis、/api/stocks/list、/api/stocks/signals、/api/stocks/history、/api/dividend/list、/api/dividend/history、/api/dividend/ai-context、/api/events、/api/events/study、/api/ai-context`,
       404,
     );
   } catch (err) {

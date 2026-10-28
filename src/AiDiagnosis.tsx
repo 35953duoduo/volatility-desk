@@ -1,28 +1,13 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import LlmConfigDialog from "@/src/LlmConfigDialog";
 import { EmptyState, Panel } from "@/src/ui-kit";
 import { fmt, type AiContextPayload } from "@/lib/api";
-import {
-  DEFAULT_BASE_URL,
-  DEFAULT_MODEL,
-  LlmError,
-  MODEL_NOTE_FALLBACK,
-  MODEL_OPTIONS,
-  clearConfig,
-  diagnose,
-  loadConfig,
-  maskKey,
-  saveConfig,
-  testConnection,
-  type DiagnoseResult,
-  type LlmConfig,
-} from "@/lib/deepseek";
+import { LlmError, clearConfig, diagnose, loadConfig, maskKey, type DiagnoseResult, type LlmConfig } from "@/lib/deepseek";
 
 const stanceText: Record<string, { label: string; ring: string; text: string; bar: string }> = {
   buy: { label: "分批买入", ring: "border-[var(--d-mint)]/45 bg-[var(--d-mint)]/10", text: "text-[var(--d-mint)]", bar: "bg-[var(--d-mint)]" },
@@ -44,51 +29,15 @@ function message(err: unknown): string {
 export default function AiDiagnosis({ ai, symbolLabel }: { ai: AiContextPayload | null; symbolLabel: string }) {
   const [cfg, setCfg] = useState<LlmConfig | null>(() => loadConfig());
   const [open, setOpen] = useState(false);
-  const [draft, setDraft] = useState({ apiKey: "", model: DEFAULT_MODEL, baseUrl: DEFAULT_BASE_URL });
   const [focus, setFocus] = useState("");
   const [busy, setBusy] = useState(false);
-  const [testing, setTesting] = useState(false);
-  const [formError, setFormError] = useState<string | null>(null);
-  const [formNote, setFormNote] = useState<string | null>(null);
   const [result, setResult] = useState<DiagnoseResult | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const keyRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     setResult(null);
     setError(null);
   }, [symbolLabel]);
-
-  function openForm() {
-    setDraft({ apiKey: cfg?.apiKey ?? "", model: cfg?.model ?? DEFAULT_MODEL, baseUrl: cfg?.baseUrl ?? DEFAULT_BASE_URL });
-    setFormError(null);
-    setFormNote(null);
-    setOpen(true);
-    window.setTimeout(() => keyRef.current?.focus(), 60);
-  }
-
-  async function submitForm() {
-    setFormError(null);
-    setFormNote(null);
-    let saved: LlmConfig;
-    try {
-      saved = saveConfig(draft);
-    } catch (err) {
-      setFormError(message(err));
-      return;
-    }
-    setCfg(saved);
-    setTesting(true);
-    try {
-      const probe = await testConnection(saved);
-      setFormNote(`连接成功：${probe.model} 回复「${probe.reply || "—"}」，测试消耗 ${probe.usage.totalTokens ?? "—"} tokens。`);
-      window.setTimeout(() => setOpen(false), 900);
-    } catch (err) {
-      setFormError(message(err) + "（密钥已保存在本机，可修正后重试）");
-    } finally {
-      setTesting(false);
-    }
-  }
 
   function forget() {
     clearConfig();
@@ -121,7 +70,7 @@ export default function AiDiagnosis({ ai, symbolLabel }: { ai: AiContextPayload 
       action={
         cfg ? (
           <div className="flex gap-1.5">
-            <Button size="sm" variant="outline" onClick={openForm}>
+            <Button size="sm" variant="outline" onClick={() => setOpen(true)}>
               修改模型
             </Button>
             <Button size="sm" variant="ghost" onClick={forget}>
@@ -129,7 +78,7 @@ export default function AiDiagnosis({ ai, symbolLabel }: { ai: AiContextPayload 
             </Button>
           </div>
         ) : (
-          <Button size="sm" onClick={openForm}>
+          <Button size="sm" onClick={() => setOpen(true)}>
             添加模型
           </Button>
         )
@@ -229,88 +178,7 @@ export default function AiDiagnosis({ ai, symbolLabel }: { ai: AiContextPayload 
         </div>
       )}
 
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle>添加 DeepSeek 模型</DialogTitle>
-            <DialogDescription>
-              在 platform.deepseek.com 生成 API Key 后粘贴到此处。密钥只写入本机浏览器存储，调用时由浏览器直接发给 DeepSeek 官方接口，本站服务端不会收到它。
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-3">
-            <div>
-              <Label className="text-[11px] text-muted-foreground">API Key</Label>
-              <Input
-                ref={keyRef}
-                className="tnum mt-1"
-                type="password"
-                autoComplete="off"
-                spellCheck={false}
-                value={draft.apiKey}
-                onChange={(e) => setDraft({ ...draft, apiKey: e.target.value })}
-                placeholder="sk-..."
-              />
-            </div>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div>
-                <Label className="text-[11px] text-muted-foreground">模型名</Label>
-                <Input
-                  className="tnum mt-1"
-                  value={draft.model}
-                  onChange={(e) => setDraft({ ...draft, model: e.target.value })}
-                  placeholder={DEFAULT_MODEL}
-                  spellCheck={false}
-                />
-                <div className="mt-1.5 flex flex-wrap gap-1.5">
-                  {MODEL_OPTIONS.map((m) => (
-                    <button
-                      key={m.id}
-                      type="button"
-                      onClick={() => setDraft({ ...draft, model: m.id })}
-                      className={
-                        "tnum rounded-full border px-2 py-0.5 text-[11px] transition-colors " +
-                        (draft.model.trim() === m.id
-                          ? "border-[var(--d-rv21)]/60 bg-[var(--d-rv21)]/10 text-[var(--d-rv21)]"
-                          : "border-border text-muted-foreground hover:text-foreground")
-                      }
-                    >
-                      {m.id}
-                    </button>
-                  ))}
-                </div>
-                <p className="mt-1 text-[11px] leading-snug text-muted-foreground">
-                  {MODEL_OPTIONS.find((m) => m.id === draft.model.trim())?.note ?? MODEL_NOTE_FALLBACK}
-                </p>
-              </div>
-              <div>
-                <Label className="text-[11px] text-muted-foreground">接口地址</Label>
-                <Input
-                  className="tnum mt-1"
-                  value={draft.baseUrl}
-                  onChange={(e) => setDraft({ ...draft, baseUrl: e.target.value })}
-                  placeholder={DEFAULT_BASE_URL}
-                />
-                <p className="mt-1 text-[11px] text-muted-foreground">官方默认 https://api.deepseek.com，仅支持 HTTPS。</p>
-              </div>
-            </div>
-            {formError ? (
-              <Alert className="border-[var(--d-red)]/35 bg-[var(--d-red)]/5">
-                <AlertTitle>连接测试失败</AlertTitle>
-                <AlertDescription className="text-xs leading-relaxed">{formError}</AlertDescription>
-              </Alert>
-            ) : null}
-            {formNote ? <p className="text-[11px] text-[var(--d-mint)]">{formNote}</p> : null}
-          </div>
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setOpen(false)}>
-              取消
-            </Button>
-            <Button onClick={submitForm} disabled={testing || !draft.apiKey.trim()}>
-              {testing ? "测试连接中…" : "保存并测试连接"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <LlmConfigDialog open={open} onOpenChange={setOpen} initial={cfg} onSaved={setCfg} />
     </Panel>
   );
 }

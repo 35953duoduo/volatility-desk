@@ -2,10 +2,10 @@
   "name": "volatility-desk",
   "version": "0.1.0",
   "private": true,
-  "description": "波动率观测台：纳斯达克与 A 股波动率、VIX 恐慌指数、A 股个股买卖建议与大摩报告复盘的只读分析看板。",
+  "description": "波动率观测台：纳斯达克与 A 股波动率、VIX 恐慌指数、A 股个股买卖建议、国企红利股周线策略与大摩报告复盘的只读分析看板。",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/35953duoduo/-.git"
+    "url": "git+https://github.com/35953duoduo/volatility-desk.git"
   },
   "engines": {
     "node": "^22.13.0 || >=24.0.0"
