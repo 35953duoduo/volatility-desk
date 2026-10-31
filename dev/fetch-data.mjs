@@ -41,13 +41,25 @@ async function eastmoneyKline(secid, beg = BEG_DEFAULT) {
   return { name: data.name, code: data.code, secid, rows };
 }
 
-/** VXN / VIX 隐含波动率的候选上游（本機网络多数不可达，线上运行时可能可用） */
+/** VXN / VIX 隐含波动率的候选上游：CBOE 官方日线优先，FRED 收盘序列兜底 */
 const vxnProbes = [
   {
-    id: 'cboe_csv',
-    label: 'CBOE VXN_History.csv',
+    id: 'cboe_vxn_csv',
+    label: 'CBOE VXN_History.csv（cdn-api）',
+    url: 'https://cdn-api.cboe.com/api/global/us_indices/daily_prices/VXN_History.csv',
+    kind: 'cboe-csv',
+  },
+  {
+    id: 'cboe_vxn_csv_alt',
+    label: 'CBOE VXN_History.csv（cdn）',
     url: 'https://cdn.cboe.com/api/global/us_indices/daily_prices/VXN_History.csv',
     kind: 'cboe-csv',
+  },
+  {
+    id: 'fred_vxncls',
+    label: 'FRED VXNCLS',
+    url: 'https://fred.stlouisfed.org/graph/fredgraph.csv?id=VXNCLS',
+    kind: 'fred-csv',
   },
   {
     id: 'yahoo_chart',
@@ -60,15 +72,21 @@ const vxnProbes = [
 const vixProbes = [
   {
     id: 'cboe_vix_csv',
-    label: 'CBOE VIX_History.csv',
+    label: 'CBOE VIX_History.csv（cdn-api）',
+    url: 'https://cdn-api.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv',
+    kind: 'cboe-csv',
+  },
+  {
+    id: 'cboe_vix_csv_alt',
+    label: 'CBOE VIX_History.csv（cdn）',
     url: 'https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv',
     kind: 'cboe-csv',
   },
   {
-    id: 'cboe_vix_alt',
-    label: 'CBOE VIX（备用域名）',
-    url: 'https://cdn-api.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv',
-    kind: 'cboe-csv',
+    id: 'fred_vixcls',
+    label: 'FRED VIXCLS',
+    url: 'https://fred.stlouisfed.org/graph/fredgraph.csv?id=VIXCLS',
+    kind: 'fred-csv',
   },
   {
     id: 'yahoo_vix',
@@ -77,6 +95,14 @@ const vixProbes = [
     kind: 'yahoo',
   },
 ];
+
+function toIsoDate(raw) {
+  const v = String(raw ?? '').trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return v;
+  const us = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(v);
+  if (!us) return null;
+  return `${us[3]}-${us[1].padStart(2, '0')}-${us[2].padStart(2, '0')}`;
+}
 
 async function probeImplied(source) {
   try {
@@ -87,15 +113,16 @@ async function probeImplied(source) {
     });
     if (!res.ok) return { ...source, ok: false, note: 'HTTP ' + res.status };
     const text = await res.text();
-    if (source.kind === 'cboe-csv') {
+    if (source.kind === 'cboe-csv' || source.kind === 'fred-csv') {
+      const closeCol = source.kind === 'fred-csv' ? 1 : 4;
       const rows = text
         .split(/\r?\n/)
         .slice(1)
         .map((line) => {
           const p = line.split(',');
-          return [p[0], Number(p[2])];
+          return [toIsoDate(p[0]), Number(p[closeCol])];
         })
-        .filter((r) => /^\d{4}-\d{2}-\d{2}$/.test(r[0]) && Number.isFinite(r[1]));
+        .filter((r) => r[0] && Number.isFinite(r[1]) && r[1] > 0);
       if (!rows.length) return { ...source, ok: false, note: '未识别到数据行' };
       return { ...source, ok: true, rows, note: 'rows=' + rows.length };
     }

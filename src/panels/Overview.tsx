@@ -114,7 +114,7 @@ export default function Overview({
           hint={
             hasVxn
               ? `保险成本 隐含−已实现 ${fmt(metrics?.impliedPremium ?? null)}`
-              : "CBOE/Yahoo 上游在本环境不可访问，已回落为已实现波动率"
+              : "CBOE / FRED 上游在本环境不可达，隐含波动率暂缺，已回落为已实现波动率"
           }
         />
         <Stat
@@ -132,7 +132,12 @@ export default function Overview({
         />
       </div>
 
-      <PanicStrip panic={panic} loading={loading} />
+      <PanicStrip
+        panic={panic}
+        loading={loading}
+        metrics={metrics}
+        symbolLabel={history?.meta.symbolLabel ?? snapshot?.meta.symbolLabel ?? "所选标的"}
+      />
 
       <Panel
         title="波动率与指数走势"

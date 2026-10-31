@@ -26,12 +26,62 @@ import {
   requestJson,
   fmtDate,
   type DividendCompositeRow,
+  type DividendChangeAction,
+  type DividendGroupKey,
+  type DividendGroupTag,
   type DividendHistoryPayload,
   type DividendListPayload,
   type DividendListRow,
 } from "@/lib/api";
 
 const STANCE_THRESHOLD_TEXT = "≥30 分批低吸 · ≥10 小仓低吸 · -10~10 持有收息 · -30~-10 分批高抛 · ≤-30 显著高抛";
+
+const GROUP_FILTERS: { key: "all" | DividendGroupKey; label: string }[] = [
+  { key: "all", label: "全部" },
+  { key: "core", label: "红利底仓" },
+  { key: "chengtong", label: "中国诚通" },
+  { key: "guoxin_invest", label: "国新投资" },
+  { key: "guoxin_hongsheng", label: "国新宏盛" },
+];
+
+const GROUP_SHORT: Record<DividendGroupKey, string> = {
+  core: "底仓",
+  chengtong: "诚通",
+  guoxin_invest: "国新投资",
+  guoxin_hongsheng: "国新宏盛",
+};
+
+const ACTION_TEXT: Record<DividendChangeAction, string> = { new: "新进", increase: "增持" };
+
+function groupChipClass(key: DividendGroupKey): string {
+  switch (key) {
+    case "chengtong":
+      return "border-[var(--d-price)]/45 bg-[var(--d-price)]/10 text-[var(--d-price)]";
+    case "guoxin_invest":
+      return "border-[var(--d-mint)]/45 bg-[var(--d-mint)]/10 text-[var(--d-mint)]";
+    case "guoxin_hongsheng":
+      return "border-[var(--d-rv21)]/45 bg-[var(--d-rv21)]/10 text-[var(--d-rv21)]";
+    default:
+      return "border-border/70 bg-secondary/50 text-muted-foreground";
+  }
+}
+
+function GroupTags({ tags }: { tags: DividendGroupTag[] }) {
+  if (!tags.length) return <span className="text-[10px] text-muted-foreground">手动添加</span>;
+  return (
+    <span className="inline-flex flex-wrap gap-1">
+      {tags.map((t) => (
+        <span
+          key={t.group}
+          className={`inline-flex items-center rounded-sm border px-1 py-0.5 text-[10px] leading-none ${groupChipClass(t.group)}`}
+        >
+          {GROUP_SHORT[t.group]}
+          {t.action ? <span className="ml-0.5 opacity-80">·{ACTION_TEXT[t.action]}</span> : null}
+        </span>
+      ))}
+    </span>
+  );
+}
 
 function stanceClass(key: string): string {
   switch (key) {
@@ -133,6 +183,7 @@ function DataSources({ list }: { list: DividendListPayload }) {
             周线与分红快照生成于 {fmtDate(meta.snapshot.generatedAt)}，覆盖 {fmtDate(meta.snapshot.window.from)} 至{" "}
             {fmtDate(meta.snapshot.window.to)}；每次请求都会用最新快照重算指标，但底层行情不是逐笔实时。
           </p>
+          <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground/80">本次快照：{meta.snapshot.source}</p>
         </div>
       </div>
       <div className="mt-2.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
@@ -151,8 +202,11 @@ function DataSources({ list }: { list: DividendListPayload }) {
         ))}
       </div>
       <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
-        其余面板的数据来源：指数 / ETF / 个股日线来自东方财富（快照生成于页面数据源标签所示日期），VIX / VXN 以
-        CBOE / Yahoo 上游为准且不可达时显式降级；DeepSeek 由浏览器直连官方接口，本站服务端不代持密钥、不转发请求。
+        中国诚通 / 国新投资 / 国新宏盛分组来自用户提供的三季度持仓变动截图（未标注年份），只采用证券简称与变动方向；持股数量与持股比例没有进入本页，也未核实截图之外的后续持仓变化。
+      </p>
+      <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+        其余面板的数据来源：指数 / ETF / 个股日线来自东方财富（快照生成于页面数据源标签所示日期），VIX / VXN 取自
+        CBOE 官方日线收盘（失败回退 FRED 镜像与 Yahoo），不可达时显式降级；DeepSeek 由浏览器直连官方接口，本站服务端不代持密钥、不转发请求。
       </p>
     </Panel>
   );
@@ -209,9 +263,14 @@ function DividendDetail({
     <Panel
       title={`${payload.stock.name}（${payload.stock.code}）· 周线红利详情`}
       description={
-        <span>
-          {payload.stock.sector} · {payload.stock.note} · 数据截至 {fmtDate(m.asOf)} · 不复权周线 {payload.count} 条
-          {m.weekPartial ? " · 本周 K 线未收盘" : ""}
+        <span className="inline-flex flex-wrap items-center gap-x-1.5 gap-y-1">
+          <span>{payload.stock.sector}</span>
+          <GroupTags tags={payload.stock.groups} />
+          <span>{payload.stock.note}</span>
+          <span>
+            数据截至 {fmtDate(m.asOf)} · 不复权周线 {payload.count} 条
+            {m.weekPartial ? " · 本周 K 线未收盘" : ""}
+          </span>
         </span>
       }
       action={
@@ -513,6 +572,7 @@ export default function Dividend({
   onExtraCodesChange: (codes: string[]) => void;
 }) {
   const [selected, setSelected] = useState<string | null>(null);
+  const [groupFilter, setGroupFilter] = useState<"all" | DividendGroupKey>("all");
   const [detail, setDetail] = useState<DividendHistoryPayload | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
@@ -523,6 +583,14 @@ export default function Dividend({
 
   const stocks = list?.stocks ?? [];
   const extraErrors = list?.meta.extraErrors;
+  const groupSummaries = list?.groups ?? [];
+  const coreCount = groupSummaries.find((g) => g.key === "core")?.count ?? 0;
+  const trackingCount = stocks.filter((s) => s.groups.some((t) => t.group !== "core")).length;
+  const newTrackCount = stocks.filter((s) => !s.groups.some((t) => t.group === "core")).length;
+  const filteredStocks = useMemo(
+    () => (groupFilter === "all" ? stocks : stocks.filter((s) => s.groups.some((t) => t.group === groupFilter))),
+    [stocks, groupFilter],
+  );
   const baseCodes = useMemo(
     () => new Set(stocks.filter((s) => !extraCodes.includes(s.code)).map((s) => s.code)),
     [stocks, extraCodes],
@@ -658,8 +726,8 @@ export default function Dividend({
 
         <Panel
           title="当前清单概览"
-          description={`按综合得分排序后的分布；基础 ${list?.meta.baseCount ?? 16} 只国企红利样本${
-            list?.meta.extras?.length ? ` + ${list.meta.extras.length} 只手动添加` : ""
+          description={`按综合得分排序后的分布；红利底仓 ${coreCount || "—"} 只 + 新增跟踪 ${newTrackCount || "—"} 只 = ${stocks.length} 只，截图去重后共 ${trackingCount || "—"} 只跟踪标的（含中国神华）${
+            list?.meta.extras?.length ? `，另含 ${list.meta.extras.length} 只手动添加` : ""
           }，不代表全市场红利指数。`}
         >
           <div className="grid grid-cols-2 gap-2">
@@ -676,8 +744,11 @@ export default function Dividend({
           </div>
           <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
             {list
-              ? `共 ${list.summary.count} 只：分红稳定但价格处于高位的银行 / 煤炭 / 高速偏「高抛」，股息率与价格处于低位的保险 / 铁路偏「低吸」；中间 ${list.summary.neutral} 只维持持有收息。`
+              ? `共 ${list.summary.count} 只（含国有资本运营跟踪标的）：分红稳定但价格处于高位的银行 / 煤炭 / 高速偏「高抛」，股息率与价格处于低位的保险 / 铁路偏「低吸」；中间 ${list.summary.neutral} 只维持持有收息。跟踪标的的得分只反映其自身价格位置与分红记录，与运营公司的持仓判断无关。`
               : "正在计算红利信号…"}
+          </p>
+          <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+            中国诚通 / 国新投资 / 国新宏盛分组来自用户提供的三季度截图（未标注年份），只表示新进 / 增持方向；跟踪标的不是高股息筛选结果，持股数量、比例与成本均未纳入。
           </p>
           {list?.meta.extras?.length ? (
             <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
@@ -692,15 +763,95 @@ export default function Dividend({
 
       {list ? <DataSources list={list} /> : null}
 
+      {list ? (
+        <Panel
+          title="分组跟踪 · 中国诚通 / 国新投资 / 国新宏盛"
+          description={list.watchlistNote}
+        >
+          <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+            {list.groups.map((g) => (
+              <button
+                key={g.key}
+                type="button"
+                onClick={() => setGroupFilter(groupFilter === g.key ? "all" : g.key)}
+                className={`rounded-md border p-2.5 text-left transition-colors ${
+                  groupFilter === g.key
+                    ? "border-[var(--d-mint)]/50 bg-[var(--d-mint)]/5"
+                    : "border-border/60 bg-secondary/20 hover:border-border hover:bg-secondary/35"
+                }`}
+                title={g.description}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className={`rounded-sm border px-1 py-0.5 text-[10px] font-medium ${groupChipClass(g.key)}`}>{g.label}</span>
+                  <span className="tnum text-[11px] text-muted-foreground">{g.count} 只</span>
+                </div>
+                <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] text-muted-foreground">
+                  {g.key !== "core" ? (
+                    <>
+                      <span>
+                        新进 <span className="tnum font-medium text-foreground/80">{g.newCount}</span>
+                      </span>
+                      <span>
+                        增持 <span className="tnum font-medium text-foreground/80">{g.increaseCount}</span>
+                      </span>
+                    </>
+                  ) : null}
+                  <span>
+                    低吸 <span className="tnum font-medium text-[var(--d-mint)]">{g.lowBuy}</span>
+                  </span>
+                  <span>
+                    高抛 <span className="tnum font-medium text-[var(--d-red)]">{g.highSell}</span>
+                  </span>
+                  <span>
+                    平均股息率 <span className="tnum font-medium text-foreground/80">{g.avgYield === null ? "—" : `${g.avgYield.toFixed(2)}%`}</span>
+                  </span>
+                </div>
+                <p className="mt-1 text-[10px] leading-relaxed text-muted-foreground/80">{g.source}</p>
+              </button>
+            ))}
+          </div>
+          <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
+            点击分组卡片或下方筛选按钮可只看该组。同一只股票可能同时出现在多家运营公司名下（如中国神华、国电南瑞、中瓷电子），因此各组数量之和大于跟踪标的去重数。分组只表示截图中的新进 / 增持方向，不代表持仓成本、当前仍持有或未来继续增持；跟踪标的不是高股息筛选结果。
+          </p>
+        </Panel>
+      ) : null}
+
       <Panel
-        title="国企红利股 · 周线高抛低吸清单"
+        title="红利策略清单 · 周线高抛低吸（含国有资本运营跟踪）"
         description={
           loading && !list
             ? "正在读取周线快照并计算股息率、价格分位与周线信号…"
-            : "点击任意行查看周线价格、股息率历史、五项规则与分红记录。得分为正偏低吸、为负偏高抛；结论只作用于卫星仓。可手动添加任意沪深 A 股（最多 6 只）。"
+            : "点击任意行查看周线价格、股息率历史、五项规则与分红记录。得分为正偏低吸、为负偏高抛；结论只作用于卫星仓。可按中国诚通 / 国新投资 / 国新宏盛筛选，也可手动添加任意沪深 A 股（最多 6 只）。"
         }
-        action={list ? <span className="tnum text-[11px] text-muted-foreground">{list.count} 只 · 截至 {fmtDate(list.meta.asOf)}</span> : null}
+        action={
+          list ? (
+            <span className="tnum text-[11px] text-muted-foreground">
+              {groupFilter === "all" ? `${list.count} 只` : `${filteredStocks.length} / ${list.count} 只`} · 截至 {fmtDate(list.meta.asOf)}
+            </span>
+          ) : null
+        }
       >
+        {list ? (
+          <div className="mb-3 flex flex-wrap items-center gap-1.5">
+            <span className="mr-1 text-[11px] font-medium">分组筛选</span>
+            {GROUP_FILTERS.map((f) => {
+              const active = groupFilter === f.key;
+              const count = f.key === "all" ? stocks.length : groupSummaries.find((g) => g.key === f.key)?.count ?? 0;
+              return (
+                <Button
+                  key={f.key}
+                  size="sm"
+                  variant={active ? "default" : "outline"}
+                  className="h-7 px-2 text-[11px]"
+                  onClick={() => setGroupFilter(f.key)}
+                >
+                  {f.label}
+                  <span className="tnum ml-1 opacity-70">{count}</span>
+                </Button>
+              );
+            })}
+          </div>
+        ) : null}
         {list ? (
           <div className="mb-3 rounded-md border border-border/60 bg-secondary/20 px-2.5 py-2">
             <div className="flex flex-wrap items-center gap-2">
@@ -773,14 +924,17 @@ export default function Dividend({
           </div>
         ) : stocks.length === 0 ? (
           <EmptyState text="红利观察清单为空：可在上方手动添加股票，或运行 node dev/fetch-dividend-data.mjs 重新生成周线与分红快照。" />
+        ) : filteredStocks.length === 0 ? (
+          <EmptyState text="该分组暂无标的；切换到「全部」或手动添加个股。" />
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[1080px] border-collapse">
+            <table className="w-full min-w-[1220px] border-collapse">
               <thead>
                 <tr className="border-b border-border/70">
                   <Th right>#</Th>
                   <Th>代码 / 名称</Th>
                   <Th>行业</Th>
+                  <Th>跟踪分组</Th>
                   <Th right>现价</Th>
                   <Th right>本周</Th>
                   <Th right>年度股息率</Th>
@@ -794,7 +948,7 @@ export default function Dividend({
                 </tr>
               </thead>
               <tbody>
-                {stocks.map((s) => {
+                {filteredStocks.map((s) => {
                   const active = selected === s.code;
                   return (
                     <tr
@@ -809,6 +963,7 @@ export default function Dividend({
                         <span className="tnum ml-1.5 text-[11px] text-muted-foreground">{s.code}</span>
                       </Td>
                       <Td><span className="text-[11px] text-muted-foreground">{s.sector}</span></Td>
+                      <Td><GroupTags tags={s.groups} /></Td>
                       <Td right>{s.close === null ? "—" : s.close.toLocaleString("zh-CN", { maximumFractionDigits: 2 })}</Td>
                       <Td right><Delta value={s.weekChangePct} digits={2} /></Td>
                       <Td right>{pct(s.yieldFY, 2)}</Td>

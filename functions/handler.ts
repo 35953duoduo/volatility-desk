@@ -51,10 +51,37 @@ import {
   dividendMetrics,
   dividendSignals,
 } from "./dividend.ts";
+import { DIVIDEND_GROUPS, DIVIDEND_WATCHLIST_NOTE } from "./data/dividendWatchlist.ts";
+import {
+  MACRO_LIMITS,
+  MACRO_YEARS_ALLOWED,
+  getMacroAnalysis,
+  macroAiBundle,
+  macroDefinition,
+  macroMarkdown,
+  macroSnapshotMeta,
+} from "./macro.ts";
+import {
+  CYCLE_LIMITS,
+  CYCLE_YEARS_ALLOWED,
+  cycleAiBundle,
+  cycleDefinition,
+  cycleMarkdown,
+  getCycleAnalysis,
+} from "./cycle.ts";
+import {
+  VALUATION_LIMITS,
+  VALUATION_YEARS_ALLOWED,
+  getValuationAnalysis,
+  valuationAiBundle,
+  valuationDefinition,
+  valuationMarkdown,
+  valuationSnapshotMeta,
+} from "./valuation.ts";
 import { EVENTS_PROVENANCE, REPORT_BROKER, reportEvents } from "./data/events.ts";
 import { WATCHLIST_NOTE } from "./data/watchlist.ts";
 
-const VERSION = "1.7.0";
+const VERSION = "1.9.0";
 const ROUTE_ROOTS = ["api", "health", "docs"];
 
 /** A 股主要指数：大摩报告复盘的默认研究标的 */
@@ -71,6 +98,15 @@ const PANIC_DEFINITION = {
 
 const STOCK_DISCLAIMER =
   "个股诊断为量化规则与历史统计输出（权重按历史信息系数动态取值），不构成投资建议、收益承诺或个性化推荐；历史表现不保证未来结果。";
+
+const MACRO_DISCLAIMER =
+  "跨资产分析为基于 GLD / USO / TLT 收盘价与 FRED DGS10 的量化统计与启发式风险提示，不构成投资建议、收益预测或交易信号；ETF 代理存在管理费、跟踪误差与期货展期成本。";
+
+const CYCLE_DISCLAIMER =
+  "康波对照为基于真实指数收盘价的量化统计与启发式阶段匹配，不判定长波年份、不预测涨跌，不构成投资建议或交易信号。";
+
+const VALUATION_DISCLAIMER =
+  "巴菲特指数为美联储 Z.1 非金融企业股权市值 ÷ 名义 GDP 的季度统计，与 Wilshire/GDP 口径不同；历史分位只描述相对位置，不构成投资建议、收益预测或择时信号。";
 
 const YEARS_ALLOWED = [1, 2, 3, 5, 10, 20];
 const FREQ_ALLOWED = ["1d", "1w", "1m"];
@@ -119,6 +155,38 @@ function parseParams(url: URL): { route: string; symbol: string; years: number |
   const freq = FREQ_ALLOWED.includes(freqParam) ? freqParam : "1d";
   const refresh = url.searchParams.get("refresh") !== "0";
   return { route, symbol: symbolParam, years, freq, refresh };
+}
+
+/** 跨资产板块的窗口参数：只接受快照覆盖的整数年，非法值直接 400，避免静默回退 */
+function parseMacroYears(url: URL): { years: number; err?: Response } {
+  const raw = url.searchParams.get("years");
+  if (raw === null || raw === "") return { years: 3 };
+  if (raw === "all") return { years: 10 };
+  const value = Number(raw);
+  if (!Number.isFinite(value) || !MACRO_YEARS_ALLOWED.includes(value)) {
+    return {
+      years: 3,
+      err: error("invalid_years", `years 只支持 ${MACRO_YEARS_ALLOWED.join(" | ")}（或 all），收到 "${raw}"。`, 400, {
+        allowed: MACRO_YEARS_ALLOWED,
+      }),
+    };
+  }
+  return { years: value };
+}
+
+/** 康波对照与巴菲特指数的窗口参数：非法值直接 400，all 表示使用全部可比样本 */
+function parsePanelYears(url: URL, allowed: number[], fallback: number | null): { years: number | null; err?: Response } {
+  const raw = url.searchParams.get("years");
+  if (raw === null || raw === "") return { years: fallback };
+  if (raw === "all") return { years: null };
+  const value = Number(raw);
+  if (!Number.isFinite(value) || !allowed.includes(value)) {
+    return {
+      years: fallback,
+      err: error("invalid_years", `years 只支持 ${allowed.join(" | ")}（或 all），收到 "${raw}"。`, 400, { allowed }),
+    };
+  }
+  return { years: value };
 }
 
 async function buildCtx(symbol: string, years: number | null, freq: "1d" | "1w" | "1m", refresh: boolean): Promise<Ctx | { err: Response }> {
@@ -177,7 +245,7 @@ function docsPayload() {
     ok: true,
     service: "nasdaq-volatility-api",
     version: VERSION,
-    description: "波动率只读分析接口（美股科技指数 + A 股主要指数 + A 股个股 + 国企红利股）：真实行情快照 + 运行时实时上游，输出波动率序列、规则信号、量化诊断、大摩 A 股报告事件复盘、VIX 恐慌指数、带动态 IC 权重与韩国综合指数联动的个股五档建议，以及红利股的周线高抛低吸与股息率分析，并可生成可直接投喂大模型的上下文包。",
+    description: "波动率只读分析接口（美股科技指数 + A 股主要指数 + A 股个股 + 国企红利股 + 黄金 / 原油 / 美债跨资产）：真实行情快照 + 运行时实时上游，输出波动率序列、规则信号、量化诊断、大摩 A 股报告事件复盘、VIX 恐慌指数、带动态 IC 权重与韩国综合指数联动的个股五档建议、红利股的周线高抛低吸与股息率分析，以及黄金 / 原油 / 美债的区间收益、波动、回撤、相关性与启发式风险状态，并可生成可直接投喂大模型的上下文包。",
     auth: "全部接口公开只读（GET / HEAD），无需凭据、已开启跨域，便于 AI 工具 / MCP 客户端直接调用；服务端不代持大模型密钥，也不接受任何写操作。",
     basePath: "/functions/v1/app",
     commonParams: {
@@ -246,6 +314,60 @@ function docsPayload() {
         returns: "{ ok, available, meta, latest{asOf,level,pct5y,pctAll,z,regime}, series[{date,level,pct5y,pctAll,z}], definition }",
       },
       {
+        path: "/functions/v1/app/api/macro/cross-asset",
+        method: "GET",
+        purpose: "黄金 / 原油 / 美债跨资产对比：最新价格、区间收益、波动、回撤、相关矩阵、10 年期美债收益率与启发式风险状态",
+        params: {
+          years: "窗口年数：1 | 2 | 3 | 5 | 10 | all（默认 3）",
+          refresh: "1=尝试 Nasdaq / FRED 实时刷新并缓存 10 分钟（默认），0=仅用本地快照",
+        },
+        returns: "{ ok, meta, window, assets[{key,symbol,close,returns,vol21,vol63,maxDrawdown,...}], yield10y, correlations, corr63, chart, chartFreq, risk, definition, limits }",
+      },
+      {
+        path: "/functions/v1/app/api/macro/ai-context",
+        method: "GET",
+        purpose: "为 DeepSeek 跨资产风险分析生成上下文（黄金 / 原油 / 美债涨跌、相关性、利率传导与风险评分）",
+        params: {
+          years: "窗口年数：1 | 2 | 3 | 5 | 10 | all（默认 3）",
+          format: "markdown（默认，可直接粘贴给模型）| json（结构化）",
+        },
+        returns: "{ ok, meta, format, markdown | bundle }",
+      },
+      {
+        path: "/functions/v1/app/api/cycle/kondratiev",
+        method: "GET",
+        purpose: "康波周期 × 纳斯达克100 / 标普500 / 上证指数：归一化走势、区间收益、长周期年化、波动与回撤、相关性、相对强弱与四阶段启发式匹配",
+        params: {
+          years: "窗口年数：1 | 3 | 5 | 10 | all（默认 5，all 为全部共同交易日）",
+          refresh: "1=尝试实时上游并缓存 5 分钟（默认），0=仅用本地快照",
+        },
+        returns: "{ ok, meta, window, indices[], phases[], resonance, ratios[], correlations, corr63, chart, chartFreq, definition, limits }",
+      },
+      {
+        path: "/functions/v1/app/api/cycle/ai-context",
+        method: "GET",
+        purpose: "为 DeepSeek 生成康波对照上下文（三指数指标、四阶段匹配、相对强弱与相关性，含长波样本边界）",
+        params: { years: "窗口年数：1 | 3 | 5 | 10 | all（默认 5）", format: "markdown（默认）| json（结构化）" },
+        returns: "{ ok, meta, format, markdown | bundle }",
+      },
+      {
+        path: "/functions/v1/app/api/valuation/buffett",
+        method: "GET",
+        purpose: "美股巴菲特指数（Z.1 非金融企业股权市值 ÷ 名义 GDP）：最新读数、历史分位、中位数偏离、历史分布与标普500季度对照",
+        params: {
+          years: "窗口年数：1 | 3 | 5 | 10 | 20 | all（默认 20，all 为 1945 年以来全部可比季度）",
+          refresh: "1=尝试 FRED 实时刷新并缓存 30 分钟（默认），0=仅用本地快照",
+        },
+        returns: "{ ok, meta, window, latest, stats{all,recent20y,window}, chart[{date,ratio,spx}], spx, sources, definition, limits }",
+      },
+      {
+        path: "/functions/v1/app/api/valuation/ai-context",
+        method: "GET",
+        purpose: "为 DeepSeek 生成巴菲特指数上下文（估值分位、口径差异、历史分布与标普500对照）",
+        params: { years: "窗口年数：1 | 3 | 5 | 10 | 20 | all（默认 20）", format: "markdown（默认）| json（结构化）" },
+        returns: "{ ok, meta, format, markdown | bundle }",
+      },
+      {
         path: "/functions/v1/app/api/stocks/list",
         method: "GET",
         purpose: "A 股个股观察清单（基础清单来自 functions/data/watchlist.ts）及最新收盘与涨跌；可用 extra 附加任意沪深 A 股代码",
@@ -280,7 +402,7 @@ function docsPayload() {
         path: "/functions/v1/app/api/dividend/history",
         method: "GET",
         purpose: "单只红利股的周线序列、分红明细、五项规则与五档建议（长期底仓 + 卫星仓框架）；支持红利清单之外的沪深 A 股",
-        params: { code: `6 位股票代码（基础清单 ${dividendInfos().map((s) => s.code).join(" | ")}，或任意沪市 60/68、深市 00/30 代码）` },
+        params: { code: `6 位股票代码（基础清单 ${dividendInfos().length} 只，完整代码见 /api/dividend/list 的 stocks[].code；或任意沪市 60/68、深市 00/30 代码）` },
         returns: "{ ok, meta, stock, fields[], count, metrics, composite, signals[], dividends[], series[], strategy, disclaimer }",
       },
       {
@@ -301,17 +423,23 @@ function docsPayload() {
     data_quality_notes: [
       "rv21 / rv63 为由真实收盘价计算的 21 / 63 日年化已实现波动率（%），sqrt(252) 年化。",
       "vxn 为 CBOE 纳斯达克100 隐含波动率；本环境若能访问上游则给出，否则为 null 并在 sources 中说明原因。",
-      "VIX 恐慌指数（/api/volatility/panic）与 VXN 同路径：CBOE / Yahoo 上游可达时提供完整历史，不可达时接口显式返回 available=false 与原因，页面回落到已实现波动率与分位。",
+      "VIX 恐慌指数（/api/volatility/panic）与 VXN 同路径：CBOE 官方日线 CSV（cdn-api 优先）、FRED 收盘序列镜像与 Yahoo 任一可达即提供完整历史；quote 为 CBOE 官方延迟报价（约 15 分钟延迟，只作盘中参考，不参与分位与 Z 分数）。全部不可达时接口显式返回 available=false 与原因，页面回落到已实现波动率与分位。",
       "pct5y 为 rv21 相对滚动 5 年窗口的分位；pctAll 为相对全部可得样本的分位。",
       "A 股无对应 VXN 的连续隐含波动率序列，因此上证 / 沪深300 的波动率一律用收盘价计算的已实现波动率。",
       "个股清单来自 functions/data/watchlist.ts（前复权日线，东方财富）；运行时以批量行情把最新价并入最新交易日，交易日锚定上证指数最新 K 线日期。",
       "手动添加的个股通过 GET 参数 extra=code1,code2 触发（最多 6 只，仅沪市 60/68 与深市 00/30）：服务端按需抓取 2015 起的前复权日线并内存缓存 10 分钟，不写入快照或数据库；单只失败只影响该代码并返回 error 字段。",
-      "红利策略同样支持手动添加任意沪深 A 股（extra=code1,code2，最多 6 只）：服务端按需抓取 2015 起的不复权日线与东方财富分红明细（失败回退腾讯日线），缓存 10 分钟且不写入快照；单个代码失败只影响该行并在 meta.extraErrors 中说明原因。手动添加的个股不一定属于国企红利样本，其股息率与规则结果只按公开数据计算。",
+      "红利策略同样支持手动添加任意沪深 A 股（extra=code1,code2，最多 6 只）：服务端按需抓取 2015 起的不复权日线与东方财富分红明细（失败回退腾讯日线），缓存 10 分钟且不写入快照；单个代码失败只影响该行并在 meta.extraErrors 中说明原因。手动添加的个股不一定属于国企红利样本，groups 为空数组，其股息率与规则结果只按公开数据计算。",
       "个股建议的规则权重不是固定常数：每条规则用全历史「未来 63 日收益 / 规则多空状态」估计信息系数 IC，|IC| 截断到 [0.5, 3] 后归一化为合计 100%，随数据更新自动变化。",
-      "红利策略清单（/api/dividend/*）聚焦国企 / 中央国企背景的高分红标的，行情为不复权周线（每周最后一个交易日收盘），分红来自东方财富分红明细（税前每 10 股派息），周线快照由 node dev/fetch-dividend-data.mjs 生成；运行时用东方财富批量报价覆盖本周最新价。",
+      "红利策略清单（/api/dividend/*）由 16 只国企 / 中央国企红利底仓与 38 只中国诚通 / 国新投资 / 国新宏盛新增跟踪标的组成（连同底仓中的中国神华，截图去重后共 39 只）；分组来自用户提供的截图（未标注年份），只采用证券简称与变动方向，持股数量与比例未纳入。跟踪标的不是高股息筛选结果。行情为不复权周线（每周最后一个交易日收盘），分红来自东方财富分红明细（税前每 10 股派息），周线快照由 node dev/fetch-dividend-data.mjs 生成；运行时用东方财富批量报价覆盖本周最新价。",
       "红利股息率以「最近一个已实施完整年度（中期+末期，必要时含特别分红）」的税前每股分红 ÷ 当前不复权价计算；另有近 365 天现金口径。红利股改为中期+末期派息后，过渡期近 12 个月可能出现三次派息，不能直接年化。",
       "红利策略使用固定权重（股息率分位 30% + 3 年价格分位 25% + 周线 RSI 20% + 60 周均线偏离 15% + 连续分红 10%），不做动态 IC：周线自相关强、独立样本少，动态优化容易过拟合。底仓 70%–80% 与卫星仓 20%–30% 是通用框架，不是个性化配置。",
       "所有红利统计未考虑红利税、交易成本、股息再投资与个人持仓成本；历史分红不保证未来继续，量化输出不构成投资建议。",
+      "跨资产板块（/api/macro/*）以 GLD / USO / TLT 收盘价分别代理黄金 / 原油 / 美债价格，以 FRED DGS10 表示 10 年期美债收益率；ETF 存在管理费、跟踪误差、期货展期成本与基金规则偏差，不是现货定盘价或连续合约。",
+      "跨资产收益、波动与回撤均为价格口径，不含股息、票息、费用、税收与汇率换算；相关性为日收益率（10Y 收益率为日变动 bp）的 Pearson 系数，只描述历史同步程度，不代表因果。",
+      "跨资产风险评分为固定权重启发式（利率 30% / 美债 25% / 原油 25% / 联动性 20%），用于风险提示，不是概率、预测或交易信号；运行时 Nasdaq 刷新失败时保留本地快照并在 sources 中显式标注降级。",
+      "康波对照（/api/cycle/*）使用纳斯达克100、标普500与上证指数的共同交易日收盘价（2019 年 4 月起）；四阶段匹配是固定权重的启发式打分，不判定康波年份、不是概率或交易信号，约七年样本无法验证 40–60 年长波。",
+      "巴菲特指数（/api/valuation/*）采用美联储 Z.1 非金融企业股权市值（FRED NCBEILQ027S，季度，百万美元）÷ 美国名义 GDP（FRED GDP，季度，十亿美元，年化）；FRED 的 Wilshire 5000 系列已下架，因此不能与 Wilshire/GDP 口径比较绝对水平或套用其经验阈值。",
+      "估值与 GDP 均为季度数据，存在发布滞后且 GDP 会修订；历史分位只描述当前读数在本序列自身历史中的位置，不构成估值结论或择时信号；标普500仅作季度末收盘对照。",
       "数据更新节奏：指数与个股日线在收盘后更新，盘中报价来自东方财富批量行情（有延迟、可能停牌或缺失）；分红明细在方案实施后更新；没有任何逐笔或毫秒级实时行情。",
       "韩国综合指数（KOSPI）只作为个股诊断中的区域联动信号（63 日收益相关性 + beta），不单独作为标的。",
       "大摩报告事件表为人工整理的公开报道，非穷举；每条带来源与可靠性标注，报告日按其后最近交易日对齐。",
@@ -343,6 +471,21 @@ async function handleHealth(): Promise<Response> {
       generatedAt: dividendMeta().generatedAt,
       window: dividendMeta().window,
     },
+    macro: {
+      proxies: { gold: "GLD", oil: "USO", bond: "TLT", yield: "FRED DGS10" },
+      generatedAt: macroSnapshotMeta().generatedAt,
+      window: macroSnapshotMeta().window,
+      rows: macroSnapshotMeta().rows,
+      yieldRows: macroSnapshotMeta().yieldRows,
+    },
+    valuation: {
+      proxies: { marketCap: "FRED NCBEILQ027S", gdp: "FRED GDP" },
+      generatedAt: valuationSnapshotMeta().generatedAt,
+      window: valuationSnapshotMeta().window,
+      capRows: valuationSnapshotMeta().capRows,
+      gdpRows: valuationSnapshotMeta().gdpRows,
+    },
+    cycle: { indices: ["NDX100", "SPX", "SSE"], note: "康波四阶段启发式对照，不判定长波年份" },
     sources: live.statuses,
   });
 }
@@ -701,7 +844,8 @@ const DIVIDEND_LIMITS = [
   "股息率使用税前分红，未考虑红利税、交易成本、股息再投资与个人持仓成本。",
   "股息率按最近一个已实施完整年度计算，不含尚未公布的年度分红；历史分红不保证未来继续。",
   "未纳入盈利、派息率、自由现金流、利率、监管与行业景气等因素。",
-  "观察清单为人工维护的国企 / 中央国企红利样本，不是全市场红利指数，也不构成推荐。",
+  "观察清单为人工维护：16 只国企 / 中央国企红利底仓 + 38 只国有资本运营公司新增跟踪标的（连同底仓中的中国神华，截图去重后共 39 只），不是全市场红利指数，也不构成推荐。",
+  "中国诚通 / 国新投资 / 国新宏盛分组来自用户提供的三季度截图（未标注年份），只表示新进 / 增持方向；持股数量、比例、成本与后续变动均未纳入，跟踪标的不是高股息筛选结果。",
 ];
 
 interface DividendStockView {
@@ -758,6 +902,28 @@ function dividendListSummary(rows: { score: number; yieldFY: number | null }[]) 
   };
 }
 
+function dividendGroupSummaries(rows: ReturnType<typeof dividendListRow>[]) {
+  return DIVIDEND_GROUPS.map((g) => {
+    const members = rows.filter((r) => r.groups.some((t) => t.group === g.key));
+    const yields = members.map((r) => r.yieldFY).filter((v): v is number => v !== null && Number.isFinite(v));
+    const actionCount = (action: "new" | "increase") =>
+      members.filter((r) => r.groups.some((t) => t.group === g.key && t.action === action)).length;
+    return {
+      key: g.key,
+      label: g.label,
+      short: g.short,
+      description: g.description,
+      source: g.source,
+      count: members.length,
+      newCount: actionCount("new"),
+      increaseCount: actionCount("increase"),
+      lowBuy: members.filter((r) => r.score >= 10).length,
+      highSell: members.filter((r) => r.score <= -10).length,
+      avgYield: yields.length ? Math.round((yields.reduce((a, b) => a + b, 0) / yields.length) * 100) / 100 : null,
+    };
+  });
+}
+
 function dividendAiBundle(view: DividendStockView, statuses: { id: string; label: string; mode: string; ok: boolean; note: string }[], refresh: boolean) {
   const m = view.metrics!;
   const code = view.info.code;
@@ -777,6 +943,7 @@ function dividendAiBundle(view: DividendStockView, statuses: { id: string; label
       name: view.info.name,
       sector: view.info.sector,
       note: view.info.note,
+      groups: view.info.groups,
       close: m.close,
       weekPartial: m.weekPartial,
     },
@@ -813,6 +980,18 @@ function dividendAiBundle(view: DividendStockView, statuses: { id: string; label
   return bundle;
 }
 
+function dividendGroupText(tags: ReturnType<typeof dividendInfos>[number]["groups"]): string {
+  if (!tags.length) return "手动添加（无分组）";
+  return tags
+    .map((t) => {
+      const label = DIVIDEND_GROUPS.find((g) => g.key === t.group)?.label ?? t.group;
+      if (t.action === "new") return `${label}·新进`;
+      if (t.action === "increase") return `${label}·增持`;
+      return label;
+    })
+    .join("、");
+}
+
 function dividendMarkdown(view: DividendStockView, bundle: ReturnType<typeof dividendAiBundle>, statuses: { label: string; mode: string; ok: boolean; note: string }[]) {
   const m = view.metrics!;
   const lines: string[] = [];
@@ -821,6 +1000,7 @@ function dividendMarkdown(view: DividendStockView, bundle: ReturnType<typeof div
   lines.push("");
   lines.push("## 一、标的与核心指标");
   lines.push(`- 行业：${view.info.sector}｜说明：${view.info.note}`);
+  lines.push(`- 跟踪分组：${dividendGroupText(view.info.groups)}`);
   lines.push(`- 不复权收盘价：${m.close}${m.weekChangePct === null ? "" : `（本周 ${fmtPct(m.weekChangePct)}）`}${m.weekPartial ? "｜本周 K 线未收盘" : ""}`);
   lines.push(
     `- 最新年度股息率：${m.yieldFY === null ? "暂无完整年度分红" : `${m.yieldFY.toFixed(2)}%（FY${m.fy ?? "—"}，每股税前 ${m.dpsFY ?? "—"} 元）`}`,
@@ -993,6 +1173,7 @@ export async function handler(request: Request): Promise<Response> {
           source: status,
           reason: status?.note ?? "VIX 上游不可达，且本地快照不含 VIX 序列",
           latest: null,
+          quote: dataset.vixQuote ?? null,
           count: 0,
           series: [],
           definition: PANIC_DEFINITION,
@@ -1006,6 +1187,7 @@ export async function handler(request: Request): Promise<Response> {
         source: status,
         count: series.length,
         latest: panicLatest(series),
+        quote: dataset.vixQuote ?? null,
         series,
         definition: PANIC_DEFINITION,
       });
@@ -1179,6 +1361,8 @@ export async function handler(request: Request): Promise<Response> {
           sources: ds.statuses,
         },
         summary: dividendListSummary(rows),
+        groups: dividendGroupSummaries(rows),
+        watchlistNote: DIVIDEND_WATCHLIST_NOTE,
         strategy: DIVIDEND_STRATEGY,
         count: rows.length,
         stocks: rows,
@@ -1294,6 +1478,138 @@ export async function handler(request: Request): Promise<Response> {
       });
     }
 
+    if (route === "api/macro/cross-asset") {
+      const parsed = parseMacroYears(url);
+      if (parsed.err) return parsed.err;
+      const result = await getMacroAnalysis({ refresh, years: parsed.years });
+      return json({
+        ok: true,
+        meta: {
+          service: "nasdaq-volatility-api",
+          version: VERSION,
+          liveRefresh: refresh,
+          asOf: result.payload.asOf,
+          window: result.payload.window,
+          snapshot: result.snapshot,
+          sources: result.statuses,
+        },
+        ...result.payload,
+        definition: macroDefinition(),
+        limits: MACRO_LIMITS,
+        disclaimer: MACRO_DISCLAIMER,
+      });
+    }
+
+    if (route === "api/macro/ai-context") {
+      const parsed = parseMacroYears(url);
+      if (parsed.err) return parsed.err;
+      const result = await getMacroAnalysis({ refresh, years: parsed.years });
+      const bundle = macroAiBundle(result, refresh);
+      const format = (url.searchParams.get("format") ?? "markdown").toLowerCase();
+      const metaPayload = {
+        service: "nasdaq-volatility-api",
+        version: VERSION,
+        kind: "cross-asset-macro",
+        liveRefresh: refresh,
+        asOf: result.payload.asOf,
+        window: result.payload.window,
+        snapshot: result.snapshot,
+        sources: result.statuses,
+      };
+      if (format === "json") {
+        return json({ ok: true, meta: metaPayload, format: "json", bundle });
+      }
+      return json({
+        ok: true,
+        meta: metaPayload,
+        format: "markdown",
+        markdown: macroMarkdown(result),
+        bundle,
+      });
+    }
+
+    if (route === "api/cycle/kondratiev") {
+      const parsed = parsePanelYears(url, CYCLE_YEARS_ALLOWED, 5);
+      if (parsed.err) return parsed.err;
+      const result = await getCycleAnalysis({ refresh, years: parsed.years });
+      return json({
+        ok: true,
+        meta: {
+          service: "nasdaq-volatility-api",
+          version: VERSION,
+          liveRefresh: refresh,
+          asOf: result.payload.asOf,
+          window: result.payload.window,
+          sources: result.payload.sources,
+        },
+        ...result.payload,
+        definition: cycleDefinition(),
+        limits: CYCLE_LIMITS,
+        disclaimer: CYCLE_DISCLAIMER,
+      });
+    }
+
+    if (route === "api/cycle/ai-context") {
+      const parsed = parsePanelYears(url, CYCLE_YEARS_ALLOWED, 5);
+      if (parsed.err) return parsed.err;
+      const result = await getCycleAnalysis({ refresh, years: parsed.years });
+      const bundle = cycleAiBundle(result, refresh);
+      const format = (url.searchParams.get("format") ?? "markdown").toLowerCase();
+      const metaPayload = {
+        service: "nasdaq-volatility-api",
+        version: VERSION,
+        kind: "kondratiev-cycle-comparison",
+        liveRefresh: refresh,
+        asOf: result.payload.asOf,
+        window: result.payload.window,
+        sources: result.payload.sources,
+      };
+      if (format === "json") return json({ ok: true, meta: metaPayload, format: "json", bundle });
+      return json({ ok: true, meta: metaPayload, format: "markdown", markdown: cycleMarkdown(result), bundle });
+    }
+
+    if (route === "api/valuation/buffett") {
+      const parsed = parsePanelYears(url, VALUATION_YEARS_ALLOWED, 20);
+      if (parsed.err) return parsed.err;
+      const result = await getValuationAnalysis({ refresh, years: parsed.years });
+      return json({
+        ok: true,
+        meta: {
+          service: "nasdaq-volatility-api",
+          version: VERSION,
+          liveRefresh: refresh,
+          asOf: result.payload.asOf,
+          window: result.payload.window,
+          snapshot: result.snapshot,
+          sources: result.payload.sources,
+        },
+        ...result.payload,
+        definition: valuationDefinition(),
+        limits: VALUATION_LIMITS,
+        disclaimer: VALUATION_DISCLAIMER,
+      });
+    }
+
+    if (route === "api/valuation/ai-context") {
+      const parsed = parsePanelYears(url, VALUATION_YEARS_ALLOWED, 20);
+      if (parsed.err) return parsed.err;
+      const result = await getValuationAnalysis({ refresh, years: parsed.years });
+      const bundle = valuationAiBundle(result, refresh);
+      const format = (url.searchParams.get("format") ?? "markdown").toLowerCase();
+      const metaPayload = {
+        service: "nasdaq-volatility-api",
+        version: VERSION,
+        kind: "us-buffett-valuation",
+        liveRefresh: refresh,
+        asOf: result.payload.asOf,
+        window: result.payload.window,
+        snapshot: result.snapshot,
+        sources: result.payload.sources,
+      };
+      if (format === "json") return json({ ok: true, meta: metaPayload, format: "json", bundle });
+      return json({ ok: true, meta: metaPayload, format: "markdown", markdown: valuationMarkdown(result), bundle });
+    }
+
     if (route === "api/events") return await handleEvents();
 
     if (route === "api/events/study") return await handleEventStudy(url);
@@ -1307,7 +1623,7 @@ export async function handler(request: Request): Promise<Response> {
 
     return error(
       "not_found",
-      `未知路径 "${url.pathname}"。可用：/health、/docs、/api/symbols、/api/volatility/history、/api/volatility/snapshot、/api/volatility/panic、/api/signals、/api/diagnosis、/api/stocks/list、/api/stocks/signals、/api/stocks/history、/api/dividend/list、/api/dividend/history、/api/dividend/ai-context、/api/events、/api/events/study、/api/ai-context`,
+      `未知路径 "${url.pathname}"。可用：/health、/docs、/api/symbols、/api/volatility/history、/api/volatility/snapshot、/api/volatility/panic、/api/signals、/api/diagnosis、/api/macro/cross-asset、/api/macro/ai-context、/api/cycle/kondratiev、/api/cycle/ai-context、/api/valuation/buffett、/api/valuation/ai-context、/api/stocks/list、/api/stocks/signals、/api/stocks/history、/api/dividend/list、/api/dividend/history、/api/dividend/ai-context、/api/events、/api/events/study、/api/ai-context`,
       404,
     );
   } catch (err) {

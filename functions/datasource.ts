@@ -4,6 +4,7 @@ import {
   dividendSnapshot,
   type DividendRecordData,
 } from "./data/dividendSnapshot.ts";
+import { DIVIDEND_WATCHLIST, type DividendGroupTag } from "./data/dividendWatchlist.ts";
 import { buildSeries, type Row, type VolPoint } from "./analytics.ts";
 
 export interface SymbolConfig {
@@ -76,19 +77,34 @@ async function fetchEastmoney(secid: string, beg: string): Promise<Row[]> {
   return rows;
 }
 
-const IMPLIED_SOURCE_SETS: Record<"VIX" | "VXN", { id: string; label: string; url: string; kind: "cboe" | "yahoo" }[]> = {
+/** CBOE CDN 冷启动首字节常需 3–4 秒，隐含波动率单独用更长的超时 */
+const IMPLIED_TIMEOUT_MS = 12000;
+
+type ImpliedKind = "cboe" | "fred" | "yahoo";
+
+/**
+ * 隐含波动率上游优先级：CBOE 官方日线（cdn-api 更快）→ CBOE 备用域名 → FRED 收盘序列（通常晚一个交易日）→ Yahoo。
+ * 均为公开的官方/镜像接口；不使用转载型财经站点（反爬且非原始数据）。
+ */
+const IMPLIED_SOURCE_SETS: Record<"VIX" | "VXN", { id: string; label: string; url: string; kind: ImpliedKind }[]> = {
   VXN: [
     {
-      id: "cboe_csv",
-      label: "CBOE VXN_History.csv",
+      id: "cboe_vxn_csv",
+      label: "CBOE VXN_History.csv（cdn-api）",
+      url: "https://cdn-api.cboe.com/api/global/us_indices/daily_prices/VXN_History.csv",
+      kind: "cboe",
+    },
+    {
+      id: "cboe_vxn_csv_alt",
+      label: "CBOE VXN_History.csv（cdn）",
       url: "https://cdn.cboe.com/api/global/us_indices/daily_prices/VXN_History.csv",
       kind: "cboe",
     },
     {
-      id: "cboe_alt",
-      label: "CBOE VXN（备用域名）",
-      url: "https://cdn-api.cboe.com/api/global/us_indices/daily_prices/VXN_History.csv",
-      kind: "cboe",
+      id: "fred_vxncls",
+      label: "FRED VXNCLS（CBOE 收盘序列镜像）",
+      url: "https://fred.stlouisfed.org/graph/fredgraph.csv?id=VXNCLS",
+      kind: "fred",
     },
     {
       id: "yahoo_vxn",
@@ -100,15 +116,21 @@ const IMPLIED_SOURCE_SETS: Record<"VIX" | "VXN", { id: string; label: string; ur
   VIX: [
     {
       id: "cboe_vix_csv",
-      label: "CBOE VIX_History.csv",
+      label: "CBOE VIX_History.csv（cdn-api）",
+      url: "https://cdn-api.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv",
+      kind: "cboe",
+    },
+    {
+      id: "cboe_vix_csv_alt",
+      label: "CBOE VIX_History.csv（cdn）",
       url: "https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv",
       kind: "cboe",
     },
     {
-      id: "cboe_vix_alt",
-      label: "CBOE VIX（备用域名）",
-      url: "https://cdn-api.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv",
-      kind: "cboe",
+      id: "fred_vixcls",
+      label: "FRED VIXCLS（CBOE 收盘序列镜像）",
+      url: "https://fred.stlouisfed.org/graph/fredgraph.csv?id=VIXCLS",
+      kind: "fred",
     },
     {
       id: "yahoo_vix",
@@ -119,13 +141,38 @@ const IMPLIED_SOURCE_SETS: Record<"VIX" | "VXN", { id: string; label: string; ur
   ],
 };
 
+function toIsoDate(raw: string): string | null {
+  const v = raw.trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return v;
+  const us = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(v);
+  if (!us) return null;
+  return `${us[3]}-${us[1].padStart(2, "0")}-${us[2].padStart(2, "0")}`;
+}
+
+/** CBOE 日线 CSV：DATE,OPEN,HIGH,LOW,CLOSE（收盘在第 5 列，日期为 MM/DD/YYYY） */
 function parseCboeCsv(text: string): Row[] {
   const rows: Row[] = [];
   const lines = text.split(/\r?\n/);
   for (let i = 1; i < lines.length; i++) {
     const p = lines[i].split(",");
-    const value = Number(p[2]);
-    if (/^\d{4}-\d{2}-\d{2}$/.test(p[0]) && Number.isFinite(value) && value > 0) rows.push([p[0], value]);
+    if (p.length < 5) continue;
+    const date = toIsoDate(p[0]);
+    const value = Number(p[4]);
+    if (date && Number.isFinite(value) && value > 0) rows.push([date, value]);
+  }
+  return rows;
+}
+
+/** FRED CSV：observation_date,VIXCLS / VXNCLS（缺失值写作 .） */
+function parseFredCsv(text: string): Row[] {
+  const rows: Row[] = [];
+  const lines = text.split(/\r?\n/);
+  for (let i = 1; i < lines.length; i++) {
+    const p = lines[i].split(",");
+    if (p.length < 2) continue;
+    const date = toIsoDate(p[0]);
+    const value = Number(p[1]);
+    if (date && Number.isFinite(value) && value > 0) rows.push([date, value]);
   }
   return rows;
 }
@@ -156,13 +203,18 @@ async function fetchImpliedVol(name: "VIX" | "VXN"): Promise<{ rows: Row[]; sour
         const res = await fetch(src.url, {
           headers: { "User-Agent": UA, Accept: "text/csv,application/json,*/*" },
           redirect: "follow",
-          signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+          signal: AbortSignal.timeout(IMPLIED_TIMEOUT_MS),
         });
         if (!res.ok) throw new Error("HTTP " + res.status);
         const text = await res.text();
-        const rows = src.kind === "cboe" ? parseCboeCsv(text) : parseYahooChart(text);
+        const rows =
+          src.kind === "cboe" ? parseCboeCsv(text) : src.kind === "fred" ? parseFredCsv(text) : parseYahooChart(text);
         if (!rows.length) throw new Error("未识别到数据行");
-        return { src, rows, note: "实时上游" } as const;
+        return {
+          src,
+          rows,
+          note: src.kind === "fred" ? "FRED 镜像（通常较 CBOE 晚一个交易日）" : "官方日线收盘",
+        } as const;
       } catch (err) {
         const note = err instanceof Error ? err.message : String(err);
         return { src, rows: null, note: note.slice(0, 80) } as const;
@@ -174,12 +226,74 @@ async function fetchImpliedVol(name: "VIX" | "VXN"): Promise<{ rows: Row[]; sour
     if (a.rows && a.rows.length) {
       return {
         rows: a.rows,
-        source: { id: a.src.id, label: a.src.label, kind: "implied_vol", mode: "live", ok: true, note: a.note, rows: a.rows.length },
+        source: {
+          id: name === "VIX" ? "implied_vol_vix" : "implied_vol",
+          label: a.src.label,
+          kind: "implied_vol",
+          mode: "live",
+          ok: true,
+          note: `${a.note}（${a.src.id}）`,
+          rows: a.rows.length,
+        },
       };
     }
     failures.push(`${a.src.id}=${a.note}`);
   }
   lastImpliedErrors[name] = failures.join("，").slice(0, 160);
+  return null;
+}
+
+export interface ImpliedQuote {
+  id: string;
+  label: string;
+  level: number;
+  change: number | null;
+  changePct: number | null;
+  prevClose: number | null;
+  lastTrade: string | null;
+}
+
+const CBOE_QUOTE_URLS = [
+  "https://cdn-api.cboe.com/api/global/delayed_quotes/quotes/_VIX.json",
+  "https://cdn.cboe.com/api/global/delayed_quotes/quotes/_VIX.json",
+];
+
+/** CBOE 官方延迟报价（约 15 分钟延迟）：只作盘中参考，日线、分位与 Z 分数仍以收盘序列为准 */
+async function fetchVixQuote(): Promise<ImpliedQuote | null> {
+  for (const url of CBOE_QUOTE_URLS) {
+    try {
+      const res = await fetch(url, {
+        headers: { "User-Agent": UA, Accept: "application/json" },
+        redirect: "follow",
+        signal: AbortSignal.timeout(IMPLIED_TIMEOUT_MS),
+      });
+      if (!res.ok) continue;
+      const json = (await res.json()) as {
+        data?: {
+          current_price?: number;
+          price_change?: number;
+          price_change_percent?: number;
+          prev_day_close?: number;
+          last_trade_time?: string;
+        };
+      };
+      const d = json.data;
+      const level = Number(d?.current_price);
+      if (!d || !Number.isFinite(level) || level <= 0) continue;
+      const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+      return {
+        id: "cboe_vix_quote",
+        label: "CBOE 延迟报价",
+        level,
+        change: num(d.price_change),
+        changePct: num(d.price_change_percent),
+        prevClose: num(d.prev_day_close),
+        lastTrade: typeof d.last_trade_time === "string" ? d.last_trade_time : null,
+      };
+    } catch {
+      /* 报价失败不影响日线序列 */
+    }
+  }
   return null;
 }
 
@@ -197,6 +311,7 @@ interface Dataset {
   updatedAt: number;
   impliedVol: Row[] | null;
   vixRows: Row[] | null;
+  vixQuote: ImpliedQuote | null;
 }
 
 let liveCache: { data: Dataset; at: number } | null = null;
@@ -210,21 +325,24 @@ async function buildDataset(refresh: boolean): Promise<Dataset> {
   const statuses: SourceStatus[] = [];
   let vxnRows: Row[] | null = snapshot.vxn ? snapshot.vxn.rows : null;
   let vixBase: Row[] | null = snapshot.vix ? snapshot.vix.rows : null;
+  let vixQuote: ImpliedQuote | null = null;
   const liveExtra = new Map<string, Row[]>();
   const liveVxn = new Map<string, number>();
   const liveVix = new Map<string, number>();
 
   if (refresh) {
-    // 隐含波动率（VXN、VIX）与价格增量并行请求，单路超时 3.5s，整体最坏约 4s
-    const [vxnImplied, vixImplied, ...priceResults] = await Promise.all([
+    // 隐含波动率、CBOE 延迟报价与价格增量并行请求；仅隐含波动率使用更长超时
+    const [vxnImplied, vixImplied, quote, ...priceResults] = await Promise.all([
       fetchImpliedVol("VXN"),
       fetchImpliedVol("VIX"),
+      fetchVixQuote(),
       ...SYMBOLS.map((cfg) =>
         fetchEastmoney(cfg.secid, LIVE_BEG)
           .then((rows) => ({ cfg, rows, err: null as Error | null }))
           .catch((err: unknown) => ({ cfg, rows: null as Row[] | null, err: err as Error })),
       ),
     ]);
+    vixQuote = quote;
 
     if (vxnImplied) {
       for (const [d, v] of vxnImplied.rows) liveVxn.set(d, v);
@@ -233,7 +351,7 @@ async function buildDataset(refresh: boolean): Promise<Dataset> {
     } else {
       statuses.push({
         id: "implied_vol",
-        label: "VXN 隐含波动率（CBOE / Yahoo 上游）",
+        label: "VXN 隐含波动率（CBOE 官方 / FRED）",
         kind: "implied_vol",
         mode: "snapshot",
         ok: false,
@@ -247,7 +365,7 @@ async function buildDataset(refresh: boolean): Promise<Dataset> {
     } else {
       statuses.push({
         id: "implied_vol_vix",
-        label: "VIX 恐慌指数（CBOE / Yahoo 上游）",
+        label: "VIX 恐慌指数（CBOE 官方 / FRED）",
         kind: "implied_vol",
         mode: "snapshot",
         ok: false,
@@ -341,6 +459,7 @@ async function buildDataset(refresh: boolean): Promise<Dataset> {
     updatedAt: Date.now(),
     impliedVol: mergedVxn.length ? mergedVxn : null,
     vixRows: mergedVix.length ? mergedVix : null,
+    vixQuote,
   };
 }
 
@@ -903,6 +1022,7 @@ export interface DividendInfo {
   from: string;
   to: string;
   rows: number;
+  groups: DividendGroupTag[];
 }
 
 export interface DividendDataset {
@@ -1270,6 +1390,7 @@ async function loadExtraDividendStock(
       from: data.weekly[0][0],
       to: data.weekly[data.weekly.length - 1][0],
       rows: data.weekly.length,
+      groups: [],
     };
     dividendExtraCache.set(code, { at: Date.now(), entry, info });
     dividendExtraErrors.delete(code);
@@ -1338,6 +1459,8 @@ export async function getDividendDataset(opts: { refresh?: boolean; extras?: str
   };
 }
 
+const DIVIDEND_GROUPS_BY_CODE = new Map(DIVIDEND_WATCHLIST.map((s) => [s.code, s.groups]));
+
 export function dividendInfos(): DividendInfo[] {
   return dividendSnapshot.stocks.map((s) => ({
     code: s.code,
@@ -1348,6 +1471,7 @@ export function dividendInfos(): DividendInfo[] {
     from: s.weekly[0][0],
     to: s.weekly[s.weekly.length - 1][0],
     rows: s.weekly.length,
+    groups: DIVIDEND_GROUPS_BY_CODE.get(s.code) ?? [],
   }));
 }
 

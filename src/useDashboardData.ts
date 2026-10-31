@@ -10,17 +10,20 @@ import {
   query,
   requestJson,
   type AiContextPayload,
+  type CyclePayload,
   type DiagnosisPayload,
   type DividendListPayload,
   type EventsPayload,
   type EventStudyPayload,
   type HealthPayload,
   type HistoryPayload,
+  type MacroPayload,
   type PanicPayload,
   type SignalsPayload,
   type SnapshotPayload,
   type StocksListPayload,
   type StocksSignalsPayload,
+  type ValuationPayload,
 } from "@/lib/api";
 
 export interface Controls {
@@ -51,6 +54,21 @@ export interface DashboardState {
   dividendList: DividendListPayload | null;
   dividendError: string | null;
   dividendLoading: boolean;
+  macro: MacroPayload | null;
+  macroError: string | null;
+  macroLoading: boolean;
+  macroYears: number;
+  setMacroYears: (years: number) => void;
+  cycle: CyclePayload | null;
+  cycleError: string | null;
+  cycleLoading: boolean;
+  cycleYears: number | null;
+  setCycleYears: (years: number | null) => void;
+  valuation: ValuationPayload | null;
+  valuationError: string | null;
+  valuationLoading: boolean;
+  valuationYears: number | null;
+  setValuationYears: (years: number | null) => void;
   /** 手动添加的个股代码，只保存在本机浏览器 */
   extraStockCodes: string[];
   setExtraStockCodes: (codes: string[]) => void;
@@ -62,7 +80,7 @@ export interface DashboardState {
 }
 
 /** 读取本机手动添加的个股（无痕模式或损坏数据时退回空列表） */
-function readExtraStockCodes(): string[] {
+export function readExtraStockCodes(): string[] {
   try {
     const raw = localStorage.getItem(EXTRA_STOCK_STORAGE_KEY);
     if (!raw) return [];
@@ -110,9 +128,31 @@ export function useDashboardData(controls: Controls): DashboardState {
   const [dividendList, setDividendList] = useState<DividendListPayload | null>(null);
   const [dividendLoading, setDividendLoading] = useState(true);
   const [dividendError, setDividendError] = useState<string | null>(null);
+  const [macro, setMacro] = useState<MacroPayload | null>(null);
+  const [macroLoading, setMacroLoading] = useState(true);
+  const [macroError, setMacroError] = useState<string | null>(null);
+  const [macroYears, setMacroYears] = useState(3);
+  const [cycle, setCycle] = useState<CyclePayload | null>(null);
+  const [cycleLoading, setCycleLoading] = useState(true);
+  const [cycleError, setCycleError] = useState<string | null>(null);
+  const [cycleYears, setCycleYears] = useState<number | null>(5);
+  const [valuation, setValuation] = useState<ValuationPayload | null>(null);
+  const [valuationLoading, setValuationLoading] = useState(true);
+  const [valuationError, setValuationError] = useState<string | null>(null);
+  const [valuationYears, setValuationYears] = useState<number | null>(20);
   const [extraStockCodes, setExtraStockCodesState] = useState<string[]>(readExtraStockCodes);
   const [dividendExtraCodes, setDividendExtraCodesState] = useState<string[]>(readDividendExtraCodes);
   const [fetchedAt, setFetchedAt] = useState<number | null>(null);
+
+  // 另一个标签页增删自选股时同步过来，避免旧列表覆盖新列表
+  useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === EXTRA_STOCK_STORAGE_KEY) setExtraStockCodesState(readExtraStockCodes());
+      if (event.key === EXTRA_DIVIDEND_STORAGE_KEY) setDividendExtraCodesState(readDividendExtraCodes());
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
 
   const setExtraStockCodes = useCallback((codes: string[]) => {
     const clean = [...new Set(codes.filter(isValidStockCode))].slice(0, EXTRA_STOCK_LIMIT);
@@ -291,6 +331,90 @@ export function useDashboardData(controls: Controls): DashboardState {
     };
   }, [dividendQs, token]);
 
+  // 跨资产（黄金 / 原油 / 美债）：窗口独立于指数标的，与实时开关联动
+  const macroQs = useMemo(
+    () => query({ years: macroYears, refresh: controls.refresh ? 1 : 0 }),
+    [macroYears, controls.refresh],
+  );
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let alive = true;
+    setMacroLoading(true);
+    setMacroError(null);
+    requestJson<MacroPayload>(`${BASE}/api/macro/cross-asset${macroQs}`, controller.signal)
+      .then((d) => {
+        if (alive) setMacro(d);
+      })
+      .catch((err) => {
+        if (!alive || (err as Error)?.name === "AbortError") return;
+        setMacroError(err instanceof ApiError ? `${err.code}: ${err.message}` : String(err));
+      })
+      .finally(() => {
+        if (alive) setMacroLoading(false);
+      });
+    return () => {
+      alive = false;
+      controller.abort();
+    };
+  }, [macroQs, token]);
+
+  // 康波对照：三指数共同交易日窗口，独立于顶部所选标的
+  const cycleQs = useMemo(
+    () => query({ years: cycleYears ?? "all", refresh: controls.refresh ? 1 : 0 }),
+    [cycleYears, controls.refresh],
+  );
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let alive = true;
+    setCycleLoading(true);
+    setCycleError(null);
+    requestJson<CyclePayload>(`${BASE}/api/cycle/kondratiev${cycleQs}`, controller.signal)
+      .then((d) => {
+        if (alive) setCycle(d);
+      })
+      .catch((err) => {
+        if (!alive || (err as Error)?.name === "AbortError") return;
+        setCycleError(err instanceof ApiError ? `${err.code}: ${err.message}` : String(err));
+      })
+      .finally(() => {
+        if (alive) setCycleLoading(false);
+      });
+    return () => {
+      alive = false;
+      controller.abort();
+    };
+  }, [cycleQs, token]);
+
+  // 巴菲特指数：季度数据，窗口默认 20 年
+  const valuationQs = useMemo(
+    () => query({ years: valuationYears ?? "all", refresh: controls.refresh ? 1 : 0 }),
+    [valuationYears, controls.refresh],
+  );
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let alive = true;
+    setValuationLoading(true);
+    setValuationError(null);
+    requestJson<ValuationPayload>(`${BASE}/api/valuation/buffett${valuationQs}`, controller.signal)
+      .then((d) => {
+        if (alive) setValuation(d);
+      })
+      .catch((err) => {
+        if (!alive || (err as Error)?.name === "AbortError") return;
+        setValuationError(err instanceof ApiError ? `${err.code}: ${err.message}` : String(err));
+      })
+      .finally(() => {
+        if (alive) setValuationLoading(false);
+      });
+    return () => {
+      alive = false;
+      controller.abort();
+    };
+  }, [valuationQs, token]);
+
   return {
     loading,
     error,
@@ -312,6 +436,21 @@ export function useDashboardData(controls: Controls): DashboardState {
     dividendList,
     dividendError,
     dividendLoading,
+    macro,
+    macroError,
+    macroLoading,
+    macroYears,
+    setMacroYears,
+    cycle,
+    cycleError,
+    cycleLoading,
+    cycleYears,
+    setCycleYears,
+    valuation,
+    valuationError,
+    valuationLoading,
+    valuationYears,
+    setValuationYears,
     extraStockCodes,
     setExtraStockCodes,
     dividendExtraCodes,

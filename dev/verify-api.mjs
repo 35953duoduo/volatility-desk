@@ -4,7 +4,7 @@ const BASE = process.env.BASE ?? "http://127.0.0.1:8000/functions/v1/app";
 const cases = [
   {
     path: "/health",
-    want: (d) => d.ok === true && Array.isArray(d.sources) && d.sources.length >= 4 && d.dividend.count === 16 && d.dividend.window.from < d.dividend.window.to,
+    want: (d) => d.ok === true && Array.isArray(d.sources) && d.sources.length >= 4 && d.dividend.count === 54 && d.dividend.window.from < d.dividend.window.to && d.macro.rows.gold > 2000 && d.macro.proxies.yield.includes("DGS10"),
   },
   {
     path: "/api/symbols",
@@ -62,6 +62,152 @@ const cases = [
         ? d.latest.level > 0 && d.series.length > 100 && ["compressed", "normal", "elevated", "panic"].includes(d.latest.regime.key)
         : Boolean(d.reason) && d.series.length === 0) &&
       Object.keys(d.definition).length >= 5,
+  },
+  {
+    path: "/api/macro/cross-asset?years=3&refresh=0",
+    want: (d) =>
+      d.window.years === 3 &&
+      d.window.days > 700 &&
+      d.assets.length === 3 &&
+      d.assets.map((a) => a.key).join() === "gold,oil,bond" &&
+      d.assets.every(
+        (a) =>
+          a.close > 0 &&
+          typeof a.dayChangePct === "number" &&
+          typeof a.returns.m3 === "number" &&
+          typeof a.returns.ytd === "number" &&
+          a.vol21 > 0 &&
+          a.maxDrawdown <= 0 &&
+          Object.keys(a.returns).length === 6,
+      ) &&
+      d.yield10y.latest > 0 &&
+      d.yield10y.pct5y >= 0 &&
+      d.yield10y.pct5y <= 100 &&
+      d.correlations.matrix.length === 4 &&
+      d.correlations.matrix.every((r) => r.length === 4) &&
+      d.corr63.matrix.length === 4 &&
+      d.chart.length > 100 &&
+      d.chart.every((p) => p.gold > 0 && p.oil > 0 && p.bond > 0) &&
+      ["1d", "1w"].includes(d.chartFreq) &&
+      d.risk.score >= 0 &&
+      d.risk.score <= 100 &&
+      ["low", "medium", "high"].includes(d.risk.level) &&
+      d.risk.drivers.length === 4 &&
+      d.risk.watch.length >= 3 &&
+      Object.keys(d.risk.components).length === 4 &&
+      d.limits.length >= 6 &&
+      Object.keys(d.definition).length >= 6 &&
+      d.meta.sources.length === 2,
+  },
+  {
+    path: "/api/macro/cross-asset?years=10&refresh=0",
+    want: (d) => d.window.years === 10 && d.window.days > 2000 && d.chart.length > 400 && d.chartFreq === "1w",
+  },
+  { path: "/api/macro/cross-asset?years=4&refresh=0", status: 400 },
+  {
+    path: "/api/macro/ai-context?years=3&format=markdown&refresh=0",
+    want: (d) =>
+      d.format === "markdown" &&
+      d.markdown.includes("跨资产风险上下文") &&
+      d.markdown.includes("三资产最新表现") &&
+      d.markdown.includes("相关性矩阵") &&
+      d.markdown.includes("风险状态") &&
+      d.markdown.includes("数据来源与口径") &&
+      d.markdown.includes("给 AI 的分析任务") &&
+      d.bundle.taskForAssistant.requiredOutput.length === 8 &&
+      d.bundle.taskForAssistant.guardrails.length === 4 &&
+      d.bundle.limits.length >= 6 &&
+      d.bundle.api.crossAsset.includes("/api/macro/cross-asset"),
+  },
+  {
+    path: "/api/macro/ai-context?years=3&format=json&refresh=0",
+    want: (d) =>
+      d.format === "json" &&
+      d.bundle.subject.name.includes("黄金") &&
+      d.bundle.subject.proxies.gold.includes("GLD") &&
+      d.bundle.assets.length === 3 &&
+      d.bundle.correlations.matrix.length === 4 &&
+      d.bundle.risk.score >= 0 &&
+      d.bundle.taskForAssistant.requiredOutput.length === 8 &&
+      d.bundle.taskForAssistant.guardrails.length === 4,
+  },
+  {
+    path: "/api/cycle/kondratiev?years=5&refresh=0",
+    want: (d) =>
+      d.indices.length === 3 &&
+      d.framework.length === 4 &&
+      d.framework.map((f) => f.key).join(",") === "prosperity,recession,depression,recovery" &&
+      d.phases.length === 3 &&
+      d.phases.every((p) => p.scores.length === 4 && typeof p.separation === "number" && p.explanation.length > 20) &&
+      d.window.days > 1000 &&
+      d.chart.length > 200 &&
+      d.correlations.matrix.length === 3 &&
+      d.correlations.matrix.every((row) => row.length === 3) &&
+      d.ratios.length === 3 &&
+      d.indices.every((m) => m.close > 0 && m.vol21 !== null),
+  },
+  { path: "/api/cycle/kondratiev?years=7&refresh=0", status: 400 },
+  {
+    path: "/api/cycle/ai-context?years=3&format=markdown&refresh=0",
+    want: (d) =>
+      d.format === "markdown" &&
+      d.markdown.includes("康波周期 × 三大指数对照上下文") &&
+      d.markdown.includes("四阶段匹配") &&
+      d.markdown.includes("相对强弱") &&
+      d.markdown.includes("相关性") &&
+      d.bundle.subject.framework.includes("不判定长波年份") &&
+      d.bundle.phases.length === 4 &&
+      d.bundle.taskForAssistant.requiredOutput.length === 8 &&
+      d.bundle.taskForAssistant.guardrails.length === 4 &&
+      d.bundle.limits.length >= 5,
+  },
+  {
+    path: "/api/cycle/ai-context?years=3&format=json&refresh=0",
+    want: (d) =>
+      d.format === "json" &&
+      d.bundle.subject.name.includes("纳斯达克100") &&
+      d.bundle.indices.length === 3 &&
+      d.bundle.phaseMatch.length === 3 &&
+      d.bundle.correlations.matrix.length === 3 &&
+      d.bundle.api.cycle.includes("/api/cycle/kondratiev"),
+  },
+  {
+    path: "/api/valuation/buffett?years=20&refresh=0",
+    want: (d) =>
+      d.latest.ratio > 50 &&
+      d.latest.percentileAll >= 0 &&
+      d.latest.percentileAll <= 100 &&
+      d.stats.all.count > 250 &&
+      d.stats.recent20y.count === 80 &&
+      d.chart.length === 80 &&
+      d.chart.at(-1).ratio === d.latest.ratio &&
+      d.spx !== null &&
+      d.limits.length >= 5 &&
+      d.definition.buffettRatio.includes("名义 GDP"),
+  },
+  { path: "/api/valuation/buffett?years=2&refresh=0", status: 400 },
+  {
+    path: "/api/valuation/ai-context?years=20&format=markdown&refresh=0",
+    want: (d) =>
+      d.format === "markdown" &&
+      d.markdown.includes("美股巴菲特指数上下文") &&
+      d.markdown.includes("最新读数") &&
+      d.markdown.includes("历史分布") &&
+      d.markdown.includes("与标普500对照") &&
+      d.markdown.includes("给 AI 的分析任务") &&
+      d.bundle.subject.name.includes("巴菲特指数") &&
+      d.bundle.taskForAssistant.requiredOutput.length === 8 &&
+      d.bundle.taskForAssistant.guardrails.length === 4 &&
+      d.bundle.limits.length >= 6,
+  },
+  {
+    path: "/api/valuation/ai-context?years=20&format=json&refresh=0",
+    want: (d) =>
+      d.format === "json" &&
+      d.bundle.subject.numerator.includes("NCBEILQ027S") &&
+      d.bundle.latest.ratio > 50 &&
+      d.bundle.stats.all.count > 250 &&
+      d.bundle.api.buffett.includes("/api/valuation/buffett"),
   },
   {
     path: "/api/stocks/list?refresh=0",
@@ -123,23 +269,51 @@ const cases = [
   {
     path: "/api/dividend/list?refresh=0",
     want: (d) =>
-      d.count === 16 &&
-      d.stocks.length === 16 &&
+      d.count === 54 &&
+      d.stocks.length === 54 &&
       d.stocks[0].rank === 1 &&
       d.stocks.every((s, i) => (i === 0 || d.stocks[i - 1].score >= s.score)) &&
       d.stocks.every(
         (s) =>
           s.close > 0 &&
-          s.yieldFY > 0 &&
-          s.rows > 200 &&
+          (s.yieldFY === null || s.yieldFY > 0) &&
+          s.rows > 100 &&
+          Array.isArray(s.groups) &&
+          s.groups.length > 0 &&
           ["accumulate", "add", "hold", "trim", "reduce"].includes(s.stanceKey) &&
           typeof s.summary === "string" &&
           typeof s.actionHint === "string",
       ) &&
+      d.stocks.filter((s) => s.groups.length > 1).length === 3 &&
+      d.stocks.find((s) => s.code === "601088").groups.length === 3 &&
+      d.stocks.find((s) => s.code === "600406").groups.length === 2 &&
+      d.groups.length === 4 &&
+      d.groups.find((g) => g.key === "core").count === 16 &&
+      d.groups.find((g) => g.key === "chengtong").count === 13 &&
+      d.groups.find((g) => g.key === "chengtong").newCount === 9 &&
+      d.groups.find((g) => g.key === "chengtong").increaseCount === 4 &&
+      d.groups.find((g) => g.key === "guoxin_invest").count === 10 &&
+      d.groups.find((g) => g.key === "guoxin_invest").newCount === 3 &&
+      d.groups.find((g) => g.key === "guoxin_invest").increaseCount === 7 &&
+      d.groups.find((g) => g.key === "guoxin_hongsheng").count === 19 &&
+      d.groups.find((g) => g.key === "guoxin_hongsheng").newCount === 7 &&
+      d.groups.find((g) => g.key === "guoxin_hongsheng").increaseCount === 12 &&
+      d.watchlistNote.includes("未标注年份") &&
       d.strategy.weights.length === 5 &&
       Math.abs(d.strategy.weights.reduce((a, w) => a + w.weight, 0) - 100) < 1e-6 &&
       d.strategy.position.base.includes("70%") &&
-      d.summary.count === 16,
+      d.summary.count === 54,
+  },
+  {
+    path: "/api/dividend/history?code=601088&refresh=0",
+    want: (d) =>
+      d.stock.code === "601088" &&
+      d.stock.groups.length === 3 &&
+      d.stock.groups.some((g) => g.group === "core" && g.action === null) &&
+      d.stock.groups.some((g) => g.group === "guoxin_invest" && g.action === "increase") &&
+      d.stock.groups.some((g) => g.group === "guoxin_hongsheng" && g.action === "increase") &&
+      d.count > 400 &&
+      d.metrics.yieldFY > 0,
   },
   {
     path: "/api/dividend/history?code=601398&refresh=0",
@@ -167,8 +341,8 @@ const cases = [
   {
     path: "/api/dividend/list?refresh=0&extra=600000",
     want: (d) =>
-      d.count === 17 &&
-      d.meta.baseCount === 16 &&
+      d.count === 55 &&
+      d.meta.baseCount === 54 &&
       d.meta.extras.join() === "600000" &&
       d.meta.extraErrors === undefined &&
       d.stocks.some(
@@ -178,7 +352,8 @@ const cases = [
           s.sector === "手动添加" &&
           s.close > 0 &&
           s.rows > 200 &&
-          s.yieldFY > 0,
+          s.yieldFY > 0 &&
+          s.groups.length === 0,
       ),
   },
   {
@@ -209,6 +384,8 @@ const cases = [
       d.markdown.includes("五项规则") &&
       d.markdown.includes("数据来源与口径") &&
       d.markdown.includes("年度股息率（主口径）") &&
+      d.markdown.includes("跟踪分组") &&
+      d.bundle.subject.groups.length === 1 &&
       d.bundle.taskForAssistant.requiredOutput.length === 7 &&
       d.bundle.taskForAssistant.guardrails.length === 4 &&
       d.bundle.meta.liveRefresh === false,
@@ -218,6 +395,7 @@ const cases = [
     want: (d) =>
       d.format === "json" &&
       d.bundle.subject.code === "601398" &&
+      d.bundle.subject.groups.length === 1 &&
       d.bundle.strategy.weights.length === 5 &&
       d.bundle.metrics.yieldFY > 0 &&
       d.bundle.signals.length === 5 &&
@@ -227,12 +405,18 @@ const cases = [
   {
     path: "/docs",
     want: (d) =>
-      d.endpoints.length === 16 &&
+      d.endpoints.length === 22 &&
       d.endpoints.every((e) => e.method === "GET") &&
       Object.keys(d.commonParams).length === 4 &&
       d.basePath.includes("/functions/v1/app") &&
-      d.data_quality_notes.length >= 18 &&
-      d.endpoints.some((e) => e.path.endsWith("/api/dividend/list")),
+      d.data_quality_notes.length >= 20 &&
+      d.endpoints.some((e) => e.path.endsWith("/api/dividend/list")) &&
+      d.endpoints.some((e) => e.path.endsWith("/api/macro/cross-asset")) &&
+      d.endpoints.some((e) => e.path.endsWith("/api/macro/ai-context")) &&
+      d.endpoints.some((e) => e.path.endsWith("/api/cycle/kondratiev")) &&
+      d.endpoints.some((e) => e.path.endsWith("/api/cycle/ai-context")) &&
+      d.endpoints.some((e) => e.path.endsWith("/api/valuation/buffett")) &&
+      d.endpoints.some((e) => e.path.endsWith("/api/valuation/ai-context")),
   },
   { path: "/api/volatility/history?symbol=NDX100&years=3&refresh=0", want: (d) => d.meta.liveRefresh === false },
   { path: "/api/nope", status: 404 },

@@ -133,6 +133,14 @@ export interface HealthPayload {
   impliedVolAvailable: boolean;
   vixAvailable?: boolean;
   stocks?: { count: number; kospi: boolean; note: string };
+  dividend?: { count: number; generatedAt: string; window: { from: string; to: string } };
+  macro?: {
+    proxies: { gold: string; oil: string; bond: string; yield: string };
+    generatedAt: string;
+    window: { from: string; to: string };
+    rows: Record<string, number>;
+    yieldRows: number;
+  };
   sources: SourceStatus[];
 }
 
@@ -306,6 +314,16 @@ export interface PanicPayload {
     pctAll: number | null;
     z: number | null;
     regime: { label: string; key: "compressed" | "normal" | "elevated" | "panic" };
+  } | null;
+  /** CBOE 官方延迟报价（约 15 分钟延迟），只作盘中参考 */
+  quote?: {
+    id: string;
+    label: string;
+    level: number;
+    change: number | null;
+    changePct: number | null;
+    prevClose: number | null;
+    lastTrade: string | null;
   } | null;
   count: number;
   series: PanicPointRow[];
@@ -531,6 +549,28 @@ export interface DividendCompositeRow {
   satellite: string;
 }
 
+export type DividendGroupKey = "core" | "chengtong" | "guoxin_invest" | "guoxin_hongsheng";
+export type DividendChangeAction = "new" | "increase";
+
+export interface DividendGroupTag {
+  group: DividendGroupKey;
+  action: DividendChangeAction | null;
+}
+
+export interface DividendGroupSummary {
+  key: DividendGroupKey;
+  label: string;
+  short: string;
+  description: string;
+  source: string;
+  count: number;
+  newCount: number;
+  increaseCount: number;
+  lowBuy: number;
+  highSell: number;
+  avgYield: number | null;
+}
+
 export interface DividendStockInfo {
   code: string;
   name: string;
@@ -540,6 +580,7 @@ export interface DividendStockInfo {
   from: string;
   to: string;
   rows: number;
+  groups: DividendGroupTag[];
 }
 
 export interface DividendListRow extends DividendStockInfo {
@@ -569,6 +610,8 @@ export interface DividendListPayload {
   ok: boolean;
   meta: DividendMeta;
   summary: { count: number; lowBuy: number; highSell: number; neutral: number; avgYield: number | null };
+  groups: DividendGroupSummary[];
+  watchlistNote: string;
   strategy: DividendStrategy;
   count: number;
   stocks: DividendListRow[];
@@ -607,6 +650,305 @@ export interface DividendHistoryPayload {
 export interface DividendAiContextPayload {
   ok: boolean;
   meta: DividendMeta & { kind: string; code: string; name: string };
+  format: string;
+  markdown?: string;
+  bundle: Record<string, unknown>;
+}
+
+/* ===== 跨资产：黄金 / 原油 / 美债 ===== */
+
+export type MacroAssetKey = "gold" | "oil" | "bond";
+export type MacroRiskLevel = "low" | "medium" | "high";
+
+export interface MacroSourceStatus {
+  id: string;
+  label: string;
+  kind: "price" | "yield";
+  mode: "live" | "snapshot" | string;
+  ok: boolean;
+  note: string;
+  rows?: number;
+}
+
+export interface MacroReturnRow {
+  w1: number | null;
+  m1: number | null;
+  m3: number | null;
+  ytd: number | null;
+  y1: number | null;
+  window: number | null;
+}
+
+export interface MacroAssetRow {
+  key: MacroAssetKey;
+  symbol: string;
+  label: string;
+  name: string;
+  unit: string;
+  note: string;
+  asOf: string;
+  close: number;
+  dayChangePct: number | null;
+  returns: MacroReturnRow;
+  vol21: number | null;
+  vol63: number | null;
+  volPct5y: number | null;
+  maxDrawdown: number | null;
+  drawdown1y: number | null;
+}
+
+export interface MacroYieldRow {
+  key: "ust10y";
+  label: string;
+  unit: string;
+  note: string;
+  asOf: string;
+  latest: number;
+  dayChangeBp: number | null;
+  changesBp: MacroReturnRow;
+  pct5y: number | null;
+  pctAll: number | null;
+  high5y: number | null;
+  low5y: number | null;
+}
+
+export interface MacroCorrelationRow {
+  keys: (MacroAssetKey | "ust10y")[];
+  labels: string[];
+  windowDays: number;
+  matrix: (number | null)[][];
+}
+
+export interface MacroRiskDriver {
+  key: string;
+  label: string;
+  score: number;
+  state: string;
+  reading: string;
+  note: string;
+}
+
+export interface MacroRiskRow {
+  score: number;
+  level: MacroRiskLevel;
+  levelLabel: string;
+  regime: "tightening" | "reflation" | "riskoff" | "easing" | "divergent";
+  regimeLabel: string;
+  summary: string;
+  drivers: MacroRiskDriver[];
+  watch: string[];
+  components: { rate: number; bond: number; oil: number; link: number };
+}
+
+export interface MacroChartRow {
+  date: string;
+  gold: number;
+  oil: number;
+  bond: number;
+  ust10y: number | null;
+}
+
+export interface MacroMeta {
+  service: string;
+  version: string;
+  liveRefresh: boolean;
+  asOf: string;
+  window: { from: string; to: string; years: number; days: number };
+  snapshot: { source: string; generatedAt: string; window: { from: string; to: string } };
+  sources: MacroSourceStatus[];
+}
+
+export interface MacroPayload {
+  ok: boolean;
+  meta: MacroMeta;
+  asOf: string;
+  window: { from: string; to: string; years: number; days: number };
+  assets: MacroAssetRow[];
+  yield10y: MacroYieldRow;
+  correlations: MacroCorrelationRow;
+  corr63: MacroCorrelationRow;
+  chart: MacroChartRow[];
+  chartFreq: "1d" | "1w";
+  risk: MacroRiskRow;
+  definition: Record<string, string>;
+  limits: string[];
+  disclaimer: string;
+}
+
+export interface MacroAiContextPayload {
+  ok: boolean;
+  meta: MacroMeta & { kind: string };
+  format: string;
+  markdown?: string;
+  bundle: Record<string, unknown>;
+}
+
+/* ===== 康波周期 × 三大指数 ===== */
+
+export type CycleIndexKey = "NDX100" | "SPX" | "SSE";
+export type CyclePhaseKey = "prosperity" | "recession" | "depression" | "recovery";
+
+export interface CyclePhaseInfo {
+  key: CyclePhaseKey;
+  label: string;
+  english: string;
+  growth: string;
+  inflation: string;
+  rates: string;
+  equity: string;
+  observable: string;
+}
+
+export interface CycleIndexRow {
+  key: CycleIndexKey;
+  label: string;
+  short: string;
+  market: string;
+  note: string;
+  asOf: string;
+  close: number;
+  dayChangePct: number | null;
+  returns: { m1: number | null; m3: number | null; ytd: number | null; y1: number | null; window: number | null };
+  cagr3y: number | null;
+  vol21: number | null;
+  vol63: number | null;
+  volPct5y: number | null;
+  drawdown1y: number | null;
+  maxDrawdown: number | null;
+  aboveMa200: boolean | null;
+  ma200DistancePct: number | null;
+  momentum63: number | null;
+}
+
+export interface CyclePhaseRow {
+  index: CycleIndexKey;
+  label: string;
+  phase: CyclePhaseKey;
+  phaseLabel: string;
+  scores: { key: CyclePhaseKey; label: string; score: number }[];
+  separation: number;
+  drivers: { trend: number; stress: number; deepDrawdown: number; repair: number };
+  explanation: string;
+}
+
+export interface CycleRatioRow {
+  pair: string;
+  label: string;
+  latest: number;
+  windowChangePct: number | null;
+  y1ChangePct: number | null;
+  interpretation: string;
+}
+
+export interface CycleCorrelationRow {
+  keys: CycleIndexKey[];
+  labels: string[];
+  windowDays: number;
+  matrix: (number | null)[][];
+}
+
+export interface CycleChartRow {
+  date: string;
+  NDX100: number;
+  SPX: number;
+  SSE: number;
+  ndxSpx: number | null;
+  ndxSse: number | null;
+}
+
+export interface CyclePayload {
+  ok: boolean;
+  meta: {
+    service: string;
+    version: string;
+    liveRefresh: boolean;
+    asOf: string;
+    window: { from: string; to: string; years: number | null; days: number };
+    sources: SourceStatus[];
+  };
+  asOf: string;
+  window: { from: string; to: string; years: number | null; days: number };
+  /** 四阶段理论文本，由服务端统一下发，前端不再维护副本 */
+  framework: CyclePhaseInfo[];
+  indices: CycleIndexRow[];
+  phases: CyclePhaseRow[];
+  resonance: { key: string; label: string; summary: string };
+  ratios: CycleRatioRow[];
+  correlations: CycleCorrelationRow;
+  corr63: CycleCorrelationRow;
+  chart: CycleChartRow[];
+  chartFreq: "1d" | "1w";
+  definition: Record<string, string>;
+  limits: string[];
+  disclaimer: string;
+}
+
+export interface CycleAiContextPayload {
+  ok: boolean;
+  meta: { kind: string; asOf: string };
+  format: string;
+  markdown?: string;
+  bundle: Record<string, unknown> & { phases?: CyclePhaseInfo[] };
+}
+
+/* ===== 美股巴菲特指数（市值 / GDP） ===== */
+
+export interface ValuationStatsRow {
+  count: number;
+  min: number | null;
+  max: number | null;
+  mean: number | null;
+  median: number | null;
+  p25: number | null;
+  p75: number | null;
+}
+
+export interface ValuationChartRow {
+  date: string;
+  ratio: number;
+  spx: number | null;
+}
+
+export interface ValuationPayload {
+  ok: boolean;
+  meta: {
+    service: string;
+    version: string;
+    liveRefresh: boolean;
+    asOf: string;
+    window: { from: string; to: string; years: number | null; quarters: number };
+    snapshot: { source: string; generatedAt: string; window: { from: string; to: string } };
+    sources: SourceStatus[];
+  };
+  asOf: string;
+  window: { from: string; to: string; years: number | null; quarters: number };
+  latest: {
+    date: string;
+    quarter: string;
+    ratio: number;
+    capTrn: number;
+    gdpTrn: number;
+    percentileAll: number | null;
+    percentile20y: number | null;
+    medianAll: number | null;
+    median20y: number | null;
+    deviationFromMedian: number | null;
+    qoqChange: number | null;
+    yoyChange: number | null;
+    positionLabel: string;
+  };
+  stats: { all: ValuationStatsRow; recent20y: ValuationStatsRow; window: ValuationStatsRow };
+  chart: ValuationChartRow[];
+  spx: { label: string; asOf: string; close: number; quarters: number; note: string } | null;
+  sources: SourceStatus[];
+  definition: Record<string, string>;
+  limits: string[];
+  disclaimer: string;
+}
+
+export interface ValuationAiContextPayload {
+  ok: boolean;
+  meta: { kind: string; asOf: string };
   format: string;
   markdown?: string;
   bundle: Record<string, unknown>;

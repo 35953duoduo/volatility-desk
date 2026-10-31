@@ -455,6 +455,7 @@ export default function Stocks({
             topic="KOSPI"
             query="韩国综合指数 KOSPI 最新走势 影响因素 亚太市场"
             context={kospiBriefContext}
+            disabled={!kospi?.metrics}
           />
         </Panel>
 
@@ -517,7 +518,7 @@ export default function Stocks({
               添加
             </Button>
             <span className="text-[10px] text-muted-foreground">
-              支持沪市 60 / 68、深市 00 / 30 开头；自选列表只保存在本机浏览器，站点不保存、不写入任何账户。
+              支持沪市 60 / 68、深市 00 / 30 开头；自选列表只保存在本机浏览器，刷新页面、切换标签或重开浏览器后仍然保留，站点不保存、不写入任何账户。
             </span>
           </div>
           {formError ? <p className="mt-1.5 text-[11px] text-[var(--d-red)]">{formError}</p> : null}
@@ -650,7 +651,7 @@ export default function Stocks({
 
       <p className="text-[11px] leading-relaxed text-muted-foreground">
         {signals?.disclaimer ?? "个股诊断为量化规则与历史统计输出，不构成投资建议。"}
-        基础观察清单在 functions/data/watchlist.ts 中维护；手动添加的个股只保存在本机浏览器（键 vol-desk-extra-stocks），最多 6 只，可随时移除，站点服务端不保存任何自选列表。
+        基础观察清单在 functions/data/watchlist.ts 中维护；手动添加的个股只保存在本机浏览器（键 vol-desk-extra-stocks），刷新或重开页面后会自动恢复，最多 6 只，可随时移除，站点服务端不保存任何自选列表。
       </p>
     </div>
   );

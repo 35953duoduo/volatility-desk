@@ -6,12 +6,27 @@ import {
   DEFAULT_MODEL,
   MODEL_OPTIONS,
   LlmError,
+  PORTFOLIO_SYSTEM,
   SYSTEM_PROMPT,
   DIVIDEND_SYSTEM,
+  CYCLE_SYSTEM,
+  MACRO_SYSTEM,
+  VALUATION_SYSTEM,
+  VIX_SYSTEM,
+  buildCyclePrompt,
   buildDividendPrompt,
+  buildMacroPrompt,
+  buildPortfolioPrompt,
   buildUserPrompt,
+  buildValuationPrompt,
+  buildVixPrompt,
   diagnose,
+  diagnoseCycle,
   diagnoseDividend,
+  diagnoseMacro,
+  diagnosePortfolio,
+  diagnoseValuation,
+  diagnoseVix,
   endpointFor,
   extractReportEvents,
   fetchPage,
@@ -19,11 +34,13 @@ import {
   loadConfig,
   maskKey,
   parseAnalysis,
+  parsePortfolioAnalysis,
   saveConfig,
   searchWeb,
   summarizeBrief,
   testConnection,
 } from "../lib/deepseek.ts";
+import { readBriefCache, writeBriefCache } from "../lib/briefCache.ts";
 
 let pass = 0;
 let fail = 0;
@@ -274,6 +291,7 @@ check("AI 补充映射摘要结构", briefed.brief.headline === "VIX 处于中�
 check("AI 补充只打一次官方接口", briefRec.hits.length === 1 && briefRec.hits[0].url === "https://api.deepseek.com/chat/completions");
 check("AI 补充提示词含站点指标与检索材料", briefRec.hits[0].body.messages[1].content.includes("18.9") && briefRec.hits[0].body.messages[1].content.includes("example.com/n"));
 check("AI 补充要求不得编造数值", briefRec.hits[0].body.messages[0].content.includes("严禁编造") && briefRec.hits[0].body.messages[0].content.includes("唯一数值依据"));
+check("AI 补充禁止把检索旧值当作最新值", briefRec.hits[0].body.messages[0].content.includes("不得把其中的旧值当作最新值"));
 check("AI 补充不发密钥正文", !JSON.stringify(briefRec.hits[0].body).includes(SECRET));
 check("AI 补充给推理模型足够预算并压低档位", briefRec.hits[0].body.max_tokens === 4000 && briefRec.hits[0].body.effort === "low");
 
@@ -291,6 +309,16 @@ const briefRetried = await summarizeBrief({ apiKey: SECRET, model: DEFAULT_MODEL
 check("AI 补充 JSON 截断时重试一次并成功", briefTrunc.hits.length === 2 && briefRetried.brief.headline === "VIX 处于中性区间", "hits=" + briefTrunc.hits.length);
 check("AI 补充重试改用高推理档位", briefTrunc.hits[1].body.effort === "high", String(briefTrunc.hits[1].body.effort));
 await expectCode("AI 补充没有密钥时不发请求", () => summarizeBrief({ apiKey: "", model: DEFAULT_MODEL, baseUrl: DEFAULT_BASE_URL }, { topic: "VIX", context: "x", searchText: "" }, recorder(() => okResponse(BRIEF)).fetch), "missing_key");
+
+/* ===== 6b. AI 摘要缓存必须绑定本站指标版本 ===== */
+
+const cacheEntry = { at: Date.now(), context: "VIX 最新读数：18.9", brief: briefed.brief, sources: [], model: DEFAULT_MODEL, searched: true };
+writeBriefCache("TEST-VIX", cacheEntry);
+check("AI 摘要缓存同指标可复用", readBriefCache("TEST-VIX", "VIX 最新读数：18.9")?.brief.headline === "VIX 处于中性区间");
+check("本站指标变化后旧 AI 摘要失效", readBriefCache("TEST-VIX", "VIX 最新读数：21.4") === null);
+check("AI 摘要缓存超过 30 分钟失效", readBriefCache("TEST-VIX", "VIX 最新读数：18.9", Date.now() + 31 * 60 * 1000) === null);
+mem.set("vol-desk-brief-BROKEN", "{不是 JSON");
+check("损坏的 AI 缓存安全退回空值", readBriefCache("BROKEN", "x") === null);
 
 /* ===== 7. 红利策略辅助诊断：底仓 / 卫星仓框架与五档结论 ===== */
 
@@ -368,6 +396,417 @@ for (const [name, bad] of [
 await expectCode(
   "红利诊断没有密钥时不发请求",
   () => diagnoseDividend({ apiKey: "", model: DEFAULT_MODEL, baseUrl: DEFAULT_BASE_URL }, { markdown: "x" }, recorder(() => okResponse(DIVGOOD)).fetch),
+  "missing_key",
+);
+
+/* ===== 8. 跨资产风险分析：黄金 / 原油 / 美债，禁止点位与收益承诺 ===== */
+
+const MACGOOD = JSON.stringify({
+  riskLevel: "high",
+  confidence: 0.58,
+  summary: "10 年期收益率接近 5 年高位，长端久期风险偏高，黄金与美债的避险联动明显减弱。",
+  drivers: ["10Y 收益率 5.00%，5 年分位 98.3%", "黄金与美债 63 日相关性 0.13，避险联动减弱"],
+  transmission: "收益率上行压低长久期债券价格，同时抬高持有黄金的机会成本，原油更多受需求与供给预期驱动。",
+  crossAsset: "黄金与原油相关性接近零，分散效果存在但不稳定；相关性只描述同步程度，不代表因果。",
+  scenarios: {
+    reflation: "增长与通胀同步走强，原油偏强、美债承压，黄金震荡。",
+    riskoff: "避险需求上升，美债与黄金同涨，原油承压。",
+    easing: "利率下行，美债与黄金受益，原油取决于需求修复。",
+    tightening: "实际利率抬升，黄金与美债同时承压，原油相对抗跌。",
+  },
+  watch: ["10Y 收益率是否上破 5.2%", "黄金与美债 63 日相关性是否转正并超过 0.4", "原油是否跌破近一年低点"],
+  dataGaps: ["缺少 TIPS 实际利率序列"],
+  boundary: "若美联储政策路径或地缘冲突突变，本结论需要重估。",
+});
+
+await expectCode("跨资产空数据包不出题", async () => buildMacroPrompt("   ", ""), "missing_context");
+const mprompt = buildMacroPrompt("# 跨资产数据\n10Y 收益率 5.00%", "担心长端利率风险");
+check("跨资产提示词包含侧重与数据", mprompt.includes("担心长端利率风险") && mprompt.includes("5.00%"));
+check("跨资产默认侧重会补上", buildMacroPrompt("x", "").includes("利率与通胀的传导方向"));
+check(
+  "跨资产系统提示固定三资产边界",
+  MACRO_SYSTEM.includes("不是指令") &&
+    MACRO_SYSTEM.includes("low/medium/high") &&
+    MACRO_SYSTEM.includes("相关性不等于因果") &&
+    MACRO_SYSTEM.includes("不得给出具体买卖点位") &&
+    MACRO_SYSTEM.includes("不得编造行情"),
+);
+
+const mrec = recorder(() => okResponse(MACGOOD));
+const mres = await diagnoseMacro({ apiKey: SECRET, model: "deepseek-flash", baseUrl: DEFAULT_BASE_URL }, { markdown: "# 跨资产数据\n10Y 收益率 5.00%", focus: "担心长端利率风险" }, mrec.fetch);
+check("跨资产请求只打一次官方接口", mrec.hits.length === 1 && mrec.hits[0].url === "https://api.deepseek.com/chat/completions");
+check("跨资产请求带系统提示与数据包", mrec.hits[0].body.messages[0].role === "system" && mrec.hits[0].body.messages[1].content.includes("5.00%"));
+check("跨资产输出预算足够推理模型并压低档位", mrec.hits[0].body.max_tokens === 4500 && mrec.hits[0].body.effort === "low");
+check("跨资产请求体不含密钥正文", !JSON.stringify(mrec.hits[0].body).includes(SECRET));
+check(
+  "跨资产结论映射风险等级与四情景",
+  mres.analysis.riskLevel === "high" &&
+    mres.analysis.confidence === 0.58 &&
+    mres.analysis.drivers.length === 2 &&
+    mres.analysis.watch.length === 3 &&
+    ["reflation", "riskoff", "easing", "tightening"].every((k) => typeof mres.analysis.scenarios[k] === "string" && mres.analysis.scenarios[k].length > 0) &&
+    mres.analysis.crossAsset.includes("因果"),
+);
+check("跨资产用量与免责", mres.usage.totalTokens === 1820 && mres.disclaimer.includes("不构成投资建议") && mres.contextChars > 0);
+
+const mplain = recorder(() => okResponse(MACGOOD));
+await diagnoseMacro({ apiKey: SECRET, model: "gpt-4o-mini", baseUrl: "https://proxy.example.com" }, { markdown: "x" }, mplain.fetch);
+check("跨资产非推理模型用较小预算", mplain.hits[0].body.max_tokens === 1800 && !("effort" in mplain.hits[0].body));
+
+const mtrunc = (() => {
+  const hits = [];
+  return {
+    hits,
+    fetch: async (url, init) => {
+      hits.push({ url, init, body: JSON.parse(init.body) });
+      return hits.length === 1 ? okResponse('{"riskLevel":"high","confidence":0.5,"summary":"x') : okResponse(MACGOOD);
+    },
+  };
+})();
+const mretried = await diagnoseMacro({ apiKey: SECRET, model: DEFAULT_MODEL, baseUrl: DEFAULT_BASE_URL }, { markdown: "x" }, mtrunc.fetch);
+check("跨资产 JSON 被截断时自动重试一次", mtrunc.hits.length === 2 && mretried.analysis.riskLevel === "high");
+check("跨资产重试改用高推理档位", mtrunc.hits[1].body.effort === "high");
+
+const mbad = (() => {
+  const hits = [];
+  return {
+    hits,
+    fetch: async (url, init) => {
+      hits.push({ url, init, body: JSON.parse(init.body) });
+      return hits.length === 1 ? okResponse(MACGOOD.replace('"riskLevel":"high"', '"riskLevel":"extreme"')) : okResponse(MACGOOD);
+    },
+  };
+})();
+const mbadFixed = await diagnoseMacro({ apiKey: SECRET, model: DEFAULT_MODEL, baseUrl: DEFAULT_BASE_URL }, { markdown: "x" }, mbad.fetch);
+check("跨资产越界 riskLevel 重试一次后成功", mbad.hits.length === 2 && mbadFixed.analysis.riskLevel === "high", "hits=" + mbad.hits.length);
+
+for (const [name, bad] of [
+  ["跨资产置信度越界", MACGOOD.replace('"confidence":0.58', '"confidence":58')],
+  ["跨资产缺少情景", MACGOOD.replace(/"scenarios":\{[^}]*\}/, '"scenarios":"无"')],
+  ["跨资产情景缺字段", MACGOOD.replace(',"tightening":"实际利率抬升，黄金与美债同时承压，原油相对抗跌。"', "")],
+  ["跨资产驱动不是数组", MACGOOD.replace(/"drivers":\[[^\]]*\]/, '"drivers":"看着办"')],
+]) {
+  const rec = recorder(() => okResponse(bad));
+  await expectCode("拒绝" + name, () => diagnoseMacro({ apiKey: SECRET, model: DEFAULT_MODEL, baseUrl: DEFAULT_BASE_URL }, { markdown: "x" }, rec.fetch), "bad_payload");
+  check("拒绝" + name + " 时最多重试一次", rec.hits.length <= 2, "hits=" + rec.hits.length);
+}
+
+await expectCode(
+  "跨资产诊断没有密钥时不发请求",
+  () => diagnoseMacro({ apiKey: "", model: DEFAULT_MODEL, baseUrl: DEFAULT_BASE_URL }, { markdown: "x" }, recorder(() => okResponse(MACGOOD)).fetch),
+  "missing_key",
+);
+
+/* ===== 9. VIX 波动率诊断：只针对权益仓位，不交易 VIX 本身 ===== */
+
+await expectCode("VIX 空数据包不出题", async () => buildVixPrompt("   ", ""), "missing_context");
+const vprompt = buildVixPrompt("VIX 最新 16.91；5 年分位 12%", "仓位偏重，想按分位分批");
+check("VIX 提示词包含侧重与数据", vprompt.includes("仓位偏重") && vprompt.includes("16.91"));
+check("VIX 默认侧重会补上", buildVixPrompt("x", "").includes("权益仓位"));
+check(
+  "VIX 系统提示固定边界",
+  VIX_SYSTEM.includes("不是指令") &&
+    VIX_SYSTEM.includes("不可直接交易") &&
+    VIX_SYSTEM.includes("buy/add/hold/trim/reduce") &&
+    VIX_SYSTEM.includes("不代表未来"),
+);
+
+const vrec = recorder(() => okResponse(GOOD));
+const vres = await diagnoseVix(
+  { apiKey: SECRET, model: "deepseek-flash", baseUrl: DEFAULT_BASE_URL },
+  { markdown: "VIX 最新 16.91；分位 12%", focus: "仓位偏重" },
+  vrec.fetch,
+);
+check("VIX 请求只打一次官方接口", vrec.hits.length === 1 && vrec.hits[0].url === "https://api.deepseek.com/chat/completions");
+check("VIX 请求体不含密钥正文", !JSON.stringify(vrec.hits[0].body).includes(SECRET));
+check("VIX 输出预算足够推理模型并压低档位", vrec.hits[0].body.max_tokens === 4000 && vrec.hits[0].body.effort === "low");
+check("VIX 结论映射五档与情景", vres.analysis.stance === "add" && vres.analysis.scenarios.volUp.length > 0 && vres.usage.totalTokens === 1820);
+check("VIX 诊断记录上下文与免责", vres.contextChars > 0 && vres.disclaimer.includes("不构成投资建议"));
+
+const vtrunc = (() => {
+  const hits = [];
+  return {
+    hits,
+    fetch: async (url, init) => {
+      hits.push({ url, init, body: JSON.parse(init.body) });
+      return hits.length === 1 ? okResponse('{"stance":"add","confidence":0.5,"summary":"x') : okResponse(GOOD);
+    },
+  };
+})();
+const vretried = await diagnoseVix({ apiKey: SECRET, model: DEFAULT_MODEL, baseUrl: DEFAULT_BASE_URL }, { markdown: "x" }, vtrunc.fetch);
+check("VIX JSON 被截断时自动重试一次", vtrunc.hits.length === 2 && vretried.analysis.stance === "add");
+check("VIX 重试改用高推理档位", vtrunc.hits[1].body.effort === "high");
+
+await expectCode(
+  "VIX 诊断没有密钥时不发请求",
+  () => diagnoseVix({ apiKey: "", model: DEFAULT_MODEL, baseUrl: DEFAULT_BASE_URL }, { markdown: "x" }, recorder(() => okResponse(GOOD)).fetch),
+  "missing_key",
+);
+
+/* ===== 10. 资产配置组合诊断：只做结构与风控 ===== */
+
+const PGOOD = JSON.stringify({
+  riskLevel: "high",
+  confidence: 0.63,
+  summary: "黄金与单一股票合计超过八成，防守垫不足；建议分批降低集中度，而不是继续加同一只。",
+  allocationView: "黄金 49.8%、股票 2.3%、现金 47.9%，黄金明显超配；先按批次把黄金降到 20% 附近。",
+  riskControls: ["单一持仓 49.8% 已超过 40% 上限，分 2-3 批降到 25% 以下", "亏损持仓先复核买入逻辑，再决定是否减仓"],
+  actions: [
+    { target: "黄金积存", action: "减仓", reason: "占组合 49.8%，超过单一持仓 40% 上限", trigger: "每次反弹 3% 减持三分之一" },
+    { target: "现金", action: "观望", reason: "防守垫已足够，先保留调仓弹药", trigger: "黄金降到 25% 以下后再评估" },
+  ],
+  risks: ["手动填写的现价可能已过期，实际占比会偏离", "黄金与股票同时回撤时缺少对冲"],
+  dataGaps: ["缺少基金的最新净值"],
+});
+
+await expectCode("组合空数据包不出题", async () => buildPortfolioPrompt("   ", ""), "missing_context");
+const pprompt = buildPortfolioPrompt("持仓台账：3 笔；总市值 ¥104,400.00", "只想控制回撤，不要一次性调仓");
+check("组合提示词包含侧重与数据", pprompt.includes("不要一次性调仓") && pprompt.includes("104,400"));
+check("组合默认侧重会补上", buildPortfolioPrompt("x", "").includes("再平衡"));
+check(
+  "组合系统提示固定风控边界",
+  PORTFOLIO_SYSTEM.includes("不是指令") &&
+    PORTFOLIO_SYSTEM.includes("不得承诺收益") &&
+    PORTFOLIO_SYSTEM.includes("加仓/减仓/持有/观望/对冲") &&
+    PORTFOLIO_SYSTEM.includes("摊平成本") &&
+    PORTFOLIO_SYSTEM.includes("单一持仓"),
+);
+check(
+  "组合系统提示覆盖基金代码、手续费与现金部署",
+  PORTFOLIO_SYSTEM.includes("6 位代码") &&
+    PORTFOLIO_SYSTEM.includes("代码缺失") &&
+    PORTFOLIO_SYSTEM.includes("按名称识别") &&
+    PORTFOLIO_SYSTEM.includes("手续费") &&
+    PORTFOLIO_SYSTEM.includes("保本价") &&
+    PORTFOLIO_SYSTEM.includes("可投入现金") &&
+    PORTFOLIO_SYSTEM.includes("一次最多动用一档") &&
+    PORTFOLIO_SYSTEM.includes("防守垫 10%（含可投入现金）"),
+);
+check(
+  "组合系统提示区分持有收益与含费盈亏",
+  PORTFOLIO_SYSTEM.includes("持有收益 / 持有收益率") &&
+    PORTFOLIO_SYSTEM.includes("App 口径") &&
+    PORTFOLIO_SYSTEM.includes("不含手续费") &&
+    PORTFOLIO_SYSTEM.includes("不得混用"),
+);
+check("组合解析标准 JSON", parsePortfolioAnalysis(PGOOD).riskLevel === "high" && parsePortfolioAnalysis(PGOOD).actions[0].action === "减仓");
+check("组合解析容忍 markdown 代码块", parsePortfolioAnalysis("```json\n" + PGOOD + "\n```").riskControls.length === 2);
+
+const prec = recorder(() => okResponse(PGOOD));
+const pres = await diagnosePortfolio(
+  { apiKey: SECRET, model: "deepseek-flash", baseUrl: DEFAULT_BASE_URL },
+  { markdown: "持仓台账：3 笔；总市值 ¥104,400.00", focus: "控制回撤" },
+  prec.fetch,
+);
+check("组合请求只打一次官方接口", prec.hits.length === 1 && prec.hits[0].url === "https://api.deepseek.com/chat/completions");
+check("组合请求体不含密钥正文", !JSON.stringify(prec.hits[0].body).includes(SECRET));
+check("组合输出预算足够推理模型并压低档位", prec.hits[0].body.max_tokens === 4200 && prec.hits[0].body.effort === "low");
+check("组合系统消息在前、数据包在后", prec.hits[0].body.messages[0].role === "system" && prec.hits[0].body.messages[1].content.includes("104,400"));
+check(
+  "组合结论映射动作表",
+  pres.analysis.riskLevel === "high" &&
+    pres.analysis.actions.length === 2 &&
+    pres.analysis.actions[0].action === "减仓" &&
+    pres.analysis.allocationView.includes("黄金"),
+);
+check("组合诊断记录上下文与免责", pres.contextChars > 0 && pres.usage.totalTokens === 1820 && pres.disclaimer.includes("不构成投资建议"));
+
+const pplain = recorder(() => okResponse(PGOOD));
+await diagnosePortfolio({ apiKey: SECRET, model: "gpt-4o-mini", baseUrl: "https://proxy.example.com" }, { markdown: "x" }, pplain.fetch);
+check("组合非推理模型用较小预算且不注入 effort", pplain.hits[0].body.max_tokens === 1800 && !("effort" in pplain.hits[0].body));
+
+const ptrunc = (() => {
+  const hits = [];
+  return {
+    hits,
+    fetch: async (url, init) => {
+      hits.push({ url, init, body: JSON.parse(init.body) });
+      return hits.length === 1 ? okResponse('{"riskLevel":"high","confidence":0.5,"summary":"x') : okResponse(PGOOD);
+    },
+  };
+})();
+const pretried = await diagnosePortfolio({ apiKey: SECRET, model: DEFAULT_MODEL, baseUrl: DEFAULT_BASE_URL }, { markdown: "x" }, ptrunc.fetch);
+check("组合 JSON 被截断时自动重试一次", ptrunc.hits.length === 2 && pretried.analysis.riskLevel === "high");
+check("组合重试改用高推理档位", ptrunc.hits[1].body.effort === "high");
+
+for (const [name, bad] of [
+  ["组合风险等级越界", PGOOD.replace('"riskLevel":"high"', '"riskLevel":"extreme"')],
+  ["组合动作越界", PGOOD.replace('"action":"减仓"', '"action":"清仓"')],
+  ["组合置信度越界", PGOOD.replace('"confidence":0.63', '"confidence":1.6')],
+  ["组合动作为空", PGOOD.replace(/"actions":\[[^\]]*\]/, '"actions":[]')],
+  ["组合风控要点不是数组", PGOOD.replace(/"riskControls":\[[^\]]*\]/, '"riskControls":"看着办"')],
+]) {
+  const rec = recorder(() => okResponse(bad));
+  await expectCode("拒绝" + name, () => diagnosePortfolio({ apiKey: SECRET, model: DEFAULT_MODEL, baseUrl: DEFAULT_BASE_URL }, { markdown: "x" }, rec.fetch), "bad_payload");
+  check("拒绝" + name + " 时最多重试一次", rec.hits.length <= 2, "hits=" + rec.hits.length);
+}
+
+await expectCode(
+  "组合诊断没有密钥时不发请求",
+  () => diagnosePortfolio({ apiKey: "", model: DEFAULT_MODEL, baseUrl: DEFAULT_BASE_URL }, { markdown: "x" }, recorder(() => okResponse(PGOOD)).fetch),
+  "missing_key",
+);
+
+/* ===== 13. 康波周期解读：不判定长波年份 ===== */
+
+const CYCLEGOOD = JSON.stringify({
+  confidence: 0.62,
+  summary: "三指数在同一窗口内分化：纳指100与标普500保持上行，上证震荡；启发式给出美股偏繁荣、A 股偏修复的组合。",
+  indexViews: {
+    NDX100: "最新 29813.16，1Y 收益 +18.2%，距一年高点 -3.1%。",
+    SPX: "最新 7743.98，1Y 收益 +12.4%，位于 200 日线上方。",
+    SSE: "最新 3681.47，1Y 收益 +5.6%，21 日波动抬升。",
+  },
+  phaseReview: "把纳指100归为繁荣主要来自趋势与低压力，区分度足够；上证更接近回升，但与繁荣分差距较小。",
+  relativeStrength: "纳指100/上证比值窗口内上升 9.8%，说明美股成长相对 A 股走强。",
+  correlation: "63 日纳指100与上证相关性 0.24，分散效果存在，但相关不等于因果。",
+  cycleBoundary: "约七年共同样本远短于 40–60 年长波，无法验证或否定康波理论。",
+  scenarios: { continuation: "盈利上修则趋势延续。", rollover: "利率再上行则高位转弱。", repair: "A 股修复则比值回落。" },
+  watch: ["纳指100 是否跌破 200 日线", "纳指/上证比值是否见顶", "63 日相关性是否升破 0.5"],
+  dataGaps: [],
+  boundary: "若政策或盈利预期突变，本判断需要重估。",
+});
+
+await expectCode("康波空数据包不出题", async () => buildCyclePrompt("   ", ""), "missing_context");
+const cprompt = buildCyclePrompt("# 康波对照\n纳指100 29813.16", "关注相对强弱");
+check("康波提示词包含侧重与数据", cprompt.includes("关注相对强弱") && cprompt.includes("29813.16"));
+check(
+  "康波系统提示固定长波边界",
+  CYCLE_SYSTEM.includes("不是指令") &&
+    CYCLE_SYSTEM.includes("不得宣称当前处于康波第几波第几年") &&
+    CYCLE_SYSTEM.includes("相关性不等于因果") &&
+    CYCLE_SYSTEM.includes("不得给出具体买卖点位"),
+);
+
+const crec = recorder(() => okResponse(CYCLEGOOD));
+const cres = await diagnoseCycle(
+  { apiKey: SECRET, model: "deepseek-flash", baseUrl: DEFAULT_BASE_URL },
+  { markdown: "# 康波对照\n纳指100 29813.16", focus: "关注相对强弱" },
+  crec.fetch,
+);
+check("康波请求只打一次官方接口", crec.hits.length === 1 && crec.hits[0].url === "https://api.deepseek.com/chat/completions");
+check("康波请求体不含密钥正文", !JSON.stringify(crec.hits[0].body).includes(SECRET));
+check("康波输出预算足够推理模型并压低档位", crec.hits[0].body.max_tokens === 4500 && crec.hits[0].body.effort === "low");
+check(
+  "康波结论映射三指数与情景",
+  cres.analysis.indexViews.SSE.includes("3681.47") &&
+    cres.analysis.scenarios.rollover.length > 0 &&
+    cres.analysis.watch.length === 3 &&
+    cres.analysis.cycleBoundary.includes("40–60"),
+);
+check("康波诊断记录上下文与免责", cres.contextChars > 0 && cres.usage.totalTokens === 1820 && cres.disclaimer.includes("不构成投资建议"));
+
+const cplain = recorder(() => okResponse(CYCLEGOOD));
+await diagnoseCycle({ apiKey: SECRET, model: "gpt-4o-mini", baseUrl: "https://proxy.example.com" }, { markdown: "x" }, cplain.fetch);
+check("康波非推理模型用较小预算且不注入 effort", cplain.hits[0].body.max_tokens === 1800 && !("effort" in cplain.hits[0].body));
+
+const ctrunc = (() => {
+  const hits = [];
+  return {
+    hits,
+    fetch: async (url, init) => {
+      hits.push({ url, init, body: JSON.parse(init.body) });
+      return hits.length === 1 ? okResponse('{"confidence":0.5,"summary":"x') : okResponse(CYCLEGOOD);
+    },
+  };
+})();
+const cretried = await diagnoseCycle({ apiKey: SECRET, model: DEFAULT_MODEL, baseUrl: DEFAULT_BASE_URL }, { markdown: "x" }, ctrunc.fetch);
+check("康波 JSON 被截断时自动重试一次", ctrunc.hits.length === 2 && cretried.analysis.confidence === 0.62);
+check("康波重试改用高推理档位", ctrunc.hits[1].body.effort === "high");
+
+const cNoSse = CYCLEGOOD.replace(/,"SSE":"[^"]*"/, "");
+for (const [name, bad] of [
+  ["康波置信度越界", CYCLEGOOD.replace('"confidence":0.62', '"confidence":62')],
+  ["康波缺少情景", CYCLEGOOD.replace(/"scenarios":\{[^}]*\}/, '"scenarios":"无"')],
+  ["康波指数视图缺字段", cNoSse],
+  ["康波观察不是数组", CYCLEGOOD.replace(/"watch":\[[^\]]*\]/, '"watch":"看着办"')],
+]) {
+  const rec = recorder(() => okResponse(bad));
+  await expectCode("拒绝" + name, () => diagnoseCycle({ apiKey: SECRET, model: DEFAULT_MODEL, baseUrl: DEFAULT_BASE_URL }, { markdown: "x" }, rec.fetch), "bad_payload");
+  check("拒绝" + name + " 时最多重试一次", rec.hits.length <= 2, "hits=" + rec.hits.length);
+}
+
+await expectCode(
+  "康波诊断没有密钥时不发请求",
+  () => diagnoseCycle({ apiKey: "", model: DEFAULT_MODEL, baseUrl: DEFAULT_BASE_URL }, { markdown: "x" }, recorder(() => okResponse(CYCLEGOOD)).fetch),
+  "missing_key",
+);
+
+/* ===== 14. 巴菲特指数解读：Z.1 口径 ===== */
+
+const VALUATIONGOOD = JSON.stringify({
+  confidence: 0.6,
+  summary: "市值/GDP 处于该序列历史最高分位，主要由利润率与利率环境共同支撑；高分位不等于即将下跌。",
+  position: "2026Q2 比值 255.05%，全历史分位 100%，较全样本中位数 72.06% 偏离 +254%。",
+  caliber: "Z.1 含非上市股权，口径宽于 Wilshire 5000，不能套用 100%/120% 阈值。",
+  drivers: ["利润率维持高位", "长期利率与股权风险溢价变化"],
+  spxRelation: "标普500 与估值比值可长期背离，估值不是短期择时工具。",
+  scenarios: { expansion: "盈利继续上修则比值维持高位。", meanReversion: "利率上行或利润率回落则向中位数回归。", plateau: "增长温和放缓则长期横盘。" },
+  watch: ["下一季度 NCBEILQ027S", "GDP 修订幅度", "10 年期美债收益率"],
+  dataGaps: ["缺少利润率与股权风险溢价序列"],
+  boundary: "若口径或 GDP 修订变化，历史分位需要重算。",
+});
+
+await expectCode("巴菲特空数据包不出题", async () => buildValuationPrompt("   ", ""), "missing_context");
+const valprompt = buildValuationPrompt("# 巴菲特指数\n255.05%", "关注口径");
+check("巴菲特提示词包含侧重与数据", valprompt.includes("关注口径") && valprompt.includes("255.05%"));
+check(
+  "巴菲特系统提示固定口径边界",
+  VALUATION_SYSTEM.includes("不是指令") &&
+    VALUATION_SYSTEM.includes("不得套用常见的 100% 或 120% 经验阈值") &&
+    VALUATION_SYSTEM.includes("高分位不等于即将下跌") &&
+    VALUATION_SYSTEM.includes("不得给出具体买卖点位"),
+);
+
+const valrec = recorder(() => okResponse(VALUATIONGOOD));
+const valres = await diagnoseValuation(
+  { apiKey: SECRET, model: "deepseek-flash", baseUrl: DEFAULT_BASE_URL },
+  { markdown: "# 巴菲特指数\n255.05%", focus: "关注口径" },
+  valrec.fetch,
+);
+check("巴菲特请求只打一次官方接口", valrec.hits.length === 1 && valrec.hits[0].url === "https://api.deepseek.com/chat/completions");
+check("巴菲特请求体不含密钥正文", !JSON.stringify(valrec.hits[0].body).includes(SECRET));
+check("巴菲特输出预算足够推理模型并压低档位", valrec.hits[0].body.max_tokens === 4500 && valrec.hits[0].body.effort === "low");
+check(
+  "巴菲特结论映射位置与情景",
+  valres.analysis.position.includes("255.05%") &&
+    valres.analysis.caliber.includes("Wilshire") &&
+    Object.keys(valres.analysis.scenarios).length === 3 &&
+    valres.analysis.drivers.length === 2,
+);
+check("巴菲特诊断记录上下文与免责", valres.contextChars > 0 && valres.usage.totalTokens === 1820 && valres.disclaimer.includes("不构成投资建议"));
+
+const valplain = recorder(() => okResponse(VALUATIONGOOD));
+await diagnoseValuation({ apiKey: SECRET, model: "gpt-4o-mini", baseUrl: "https://proxy.example.com" }, { markdown: "x" }, valplain.fetch);
+check("巴菲特非推理模型用较小预算且不注入 effort", valplain.hits[0].body.max_tokens === 1800 && !("effort" in valplain.hits[0].body));
+
+const valtrunc = (() => {
+  const hits = [];
+  return {
+    hits,
+    fetch: async (url, init) => {
+      hits.push({ url, init, body: JSON.parse(init.body) });
+      return hits.length === 1 ? okResponse('{"confidence":0.5,"summary":"x') : okResponse(VALUATIONGOOD);
+    },
+  };
+})();
+const valretried = await diagnoseValuation({ apiKey: SECRET, model: DEFAULT_MODEL, baseUrl: DEFAULT_BASE_URL }, { markdown: "x" }, valtrunc.fetch);
+check("巴菲特 JSON 被截断时自动重试一次", valtrunc.hits.length === 2 && valretried.analysis.position.includes("255.05%"));
+check("巴菲特重试改用高推理档位", valtrunc.hits[1].body.effort === "high");
+
+for (const [name, bad] of [
+  ["巴菲特置信度越界", VALUATIONGOOD.replace('"confidence":0.6', '"confidence":6')],
+  ["巴菲特缺少情景", VALUATIONGOOD.replace(/"scenarios":\{[^}]*\}/, '"scenarios":"无"')],
+  ["巴菲特驱动不是数组", VALUATIONGOOD.replace(/"drivers":\[[^\]]*\]/, '"drivers":"看着办"')],
+]) {
+  const rec = recorder(() => okResponse(bad));
+  await expectCode("拒绝" + name, () => diagnoseValuation({ apiKey: SECRET, model: DEFAULT_MODEL, baseUrl: DEFAULT_BASE_URL }, { markdown: "x" }, rec.fetch), "bad_payload");
+  check("拒绝" + name + " 时最多重试一次", rec.hits.length <= 2, "hits=" + rec.hits.length);
+}
+
+await expectCode(
+  "巴菲特诊断没有密钥时不发请求",
+  () => diagnoseValuation({ apiKey: "", model: DEFAULT_MODEL, baseUrl: DEFAULT_BASE_URL }, { markdown: "x" }, recorder(() => okResponse(VALUATIONGOOD)).fetch),
   "missing_key",
 );
 

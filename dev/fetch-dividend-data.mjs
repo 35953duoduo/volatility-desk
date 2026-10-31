@@ -204,14 +204,17 @@ for (const item of DIVIDEND_WATCHLIST) {
   }
 }
 
-if (stocks.length < 10) {
-  console.error(`有效标的仅 ${stocks.length} 只，疑似上游大面积失败，未写入快照。请稍后重试。`);
+const minStocks = Math.max(10, Math.ceil(DIVIDEND_WATCHLIST.length * 0.9));
+if (stocks.length < minStocks) {
+  console.error(
+    `有效标的仅 ${stocks.length}/${DIVIDEND_WATCHLIST.length} 只（低于 ${minStocks} 只），疑似上游大面积失败，未写入快照。请稍后重试。`,
+  );
   process.exitCode = 1;
 } else {
   const dataset = {
     generatedAt: new Date().toISOString(),
     source:
-      '红利股不复权日线（东方财富 fqt=0，失败回退腾讯行情）+ 分红明细（东方财富 RPT_SHAREBONUS_DET，税前每 10 股派息）',
+      `红利股不复权周线（本次抓取：东方财富 ${sources.eastmoney || 0} 只，腾讯回退 ${sources.tencent || 0} 只）+ 分红明细（东方财富 RPT_SHAREBONUS_DET，税前每 10 股派息）`,
     window: {
       from: stocks.map((s) => s.weekly[0][0]).sort()[0],
       to: stocks.map((s) => s.weekly.at(-1)[0]).sort().at(-1),

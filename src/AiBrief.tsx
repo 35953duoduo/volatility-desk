@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -9,10 +9,10 @@ import {
   saveConfig,
   searchWeb,
   summarizeBrief,
-  type BriefResult,
   type LlmConfig,
   type SearchHit,
 } from "@/lib/deepseek";
+import { readBriefCache, writeBriefCache, type CachedBrief } from "@/lib/briefCache";
 
 /**
  * 指标背景补充：用访问者自己的 DeepSeek 密钥，先走官方网页检索取公开信息，
@@ -20,50 +20,26 @@ import {
  * 明确边界：这不是行情数据源；数值一律以本站接口为准，AI 摘要可能出错。
  */
 
-interface CachedBrief {
-  at: number;
-  brief: BriefResult;
-  sources: SearchHit[];
-  model: string;
-  searched: boolean;
-}
-
-const CACHE_PREFIX = "vol-desk-brief-";
-const CACHE_TTL_MS = 30 * 60 * 1000;
-
-function readCache(topic: string): CachedBrief | null {
-  try {
-    const raw = localStorage.getItem(CACHE_PREFIX + topic);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as CachedBrief;
-    if (!parsed?.at || !parsed.brief || Date.now() - parsed.at > CACHE_TTL_MS) return null;
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
-function writeCache(topic: string, value: CachedBrief): void {
-  try {
-    localStorage.setItem(CACHE_PREFIX + topic, JSON.stringify(value));
-  } catch {
-    /* 无痕模式下存不下，忽略 */
-  }
-}
-
 function message(err: unknown): string {
   if (err instanceof LlmError) return err.message;
   if (err instanceof Error) return err.message;
   return String(err);
 }
 
-export default function AiBrief({ topic, query, context }: { topic: string; query: string; context: string }) {
+export default function AiBrief({ topic, query, context, disabled = false }: { topic: string; query: string; context: string; disabled?: boolean }) {
   const [cfg, setCfg] = useState<LlmConfig | null>(() => loadConfig());
   const [key, setKey] = useState("");
   const [showForm, setShowForm] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<CachedBrief | null>(() => readCache(topic));
+  const [result, setResult] = useState<CachedBrief | null>(() => readBriefCache(topic, context));
+  const contextRef = useRef(context);
+  contextRef.current = context;
+
+  useEffect(() => {
+    setResult(readBriefCache(topic, context));
+    setError(null);
+  }, [topic, context]);
 
   async function run(active?: LlmConfig) {
     const config = active ?? loadConfig();
@@ -88,9 +64,9 @@ export default function AiBrief({ topic, query, context }: { topic: string; quer
         .map((h) => `- ${h.title}（${h.site || "来源未标注"}${h.date ? " · " + h.date : ""}）\n  ${(h.summary || h.snippet || "").slice(0, 300)}\n  ${h.url}`)
         .join("\n");
       const res = await summarizeBrief(config, { topic, context, searchText });
-      const data: CachedBrief = { at: Date.now(), brief: res.brief, sources: hits.slice(0, 5), model: res.model, searched };
-      setResult(data);
-      writeCache(topic, data);
+      const data: CachedBrief = { at: Date.now(), context, brief: res.brief, sources: hits.slice(0, 5), model: res.model, searched };
+      writeBriefCache(topic, data);
+      if (contextRef.current === context) setResult(data);
     } catch (err) {
       setError(message(err));
     } finally {
@@ -124,8 +100,8 @@ export default function AiBrief({ topic, query, context }: { topic: string; quer
           {topic} 的背景信息与解读：DeepSeek 检索公开网页后总结，数值只引用本站指标
           {cfg ? `（本机密钥 ${maskKey(cfg.apiKey)} · ${cfg.model}）` : ""}。
         </p>
-        <Button size="sm" variant="outline" className="ml-auto h-7 px-2 text-[11px]" onClick={() => void run()} disabled={busy}>
-          {busy ? "AI 检索中…" : brief ? "重新生成" : "用 DeepSeek 补充信息"}
+        <Button size="sm" variant="outline" className="ml-auto h-7 px-2 text-[11px]" onClick={() => void run()} disabled={busy || disabled}>
+          {busy ? "AI 检索中…" : disabled ? "等待本站指标" : brief ? "按最新指标重新生成" : "用 DeepSeek 补充信息"}
         </Button>
       </div>
 
